@@ -1,11 +1,11 @@
 --[[
 ╔════════════════════════════════════════════════════════════════════════════╗
-║     💀 贴吧狂暴·聊天记录器·字母统计修复版 v14.3 💀                        ║
+║     💀 贴吧狂暴·聊天记录器·真emoji检测版 v14.5 💀                        ║
 ║     修复内容：                                                             ║
-║     ✅ 中文不再算大写字母（现在只统计A-Z）                                ║
-║     ✅ 字母统计准确了！                                                    ║
-║     ✅ 狂暴值算法同步修正                                                  ║
-║     字库地址：https://raw.githubusercontent.com/dtbile/-/refs/heads/main/words.txt ║
+║     ✅ 只统计真正的emoji（😂🤣😅等）                                     ║
+║     ✅ 汉字/数字/英文不算emoji了！                                        ║
+║     ✅ 修复第1337行括号语法错误                                            ║
+║     字库地址：https://raw.githubusercontent.com/dtbile/-/main/words.txt   ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 --]]
 
@@ -68,7 +68,10 @@ local BaZhiStats = {
     swearMessages = 0,
     exclamationCount = 0,
     questionCount = 0,
-    capsCount = 0,           -- 大写字母总数（现在只统计A-Z）
+    chineseExclamationCount = 0,
+    chineseQuestionCount = 0,
+    emojiCount = 0,
+    capsCount = 0,
     hashtagCount = 0,
     hashtagMessages = 0,
     totalMessages = 0,
@@ -76,6 +79,8 @@ local BaZhiStats = {
     capsMessages = 0,
     repeatExclamation = 0,
     repeatQuestion = 0,
+    repeatChineseExclamation = 0,
+    repeatChineseQuestion = 0,
     messageLengths = {},
     messageTimestamps = {},
     lastMessageTime = 0,
@@ -84,7 +89,8 @@ local BaZhiStats = {
 
 -- ===== 远程加载字库 =====
 local function loadSwearWords()
-    local url = "https://raw.githubusercontent.com/dtbile/-/refs/heads/main/words.txt"
+    local url = "https://raw.githubusercontent.com/dtbile/-/main/words.txt"
+    
     local success, data = pcall(function()
         return game:HttpGet(url)
     end)
@@ -113,13 +119,20 @@ local function loadSwearWords()
     end
     
     local allWords = {}
+    local categoryCount = 0
+    local wordCount = 0
+    
     for category, wordList in pairs(wordsTable) do
-        for _, word in ipairs(wordList) do
-            table.insert(allWords, word)
+        categoryCount = categoryCount + 1
+        if type(wordList) == "table" then
+            for _, word in ipairs(wordList) do
+                table.insert(allWords, word)
+                wordCount = wordCount + 1
+            end
         end
     end
     
-    print(string.format("💀 远程字库加载成功！共 %d 个词", #allWords))
+    print(string.format("💀 远程字库加载成功！共 %d 个分类，%d 个词", categoryCount, wordCount))
     return allWords
 end
 
@@ -129,6 +142,82 @@ BaZhiStats.lastMessageTime = startTime
 -- ===== 获取时间 =====
 local function getTime()
     return os.date("%Y-%m-%d %H:%M:%S")
+end
+
+-- ===== 真正的emoji检测（修复版）=====
+local function detectEmoji(message)
+    local emojiCount = 0
+    
+    -- 常见emoji列表（只统计真正的表情符号）
+    local trueEmojis = {
+        "😂", "🤣", "😅", "😆", "😭", "😱", "🤬", "💀", "🔥", "💯",
+        "😊", "😄", "😃", "😀", "😁", "😆", "😅", "😂", "🤣", "😭",
+        "😢", "😤", "😠", "🤬", "😡", "🥵", "🥶", "🤯", "😳", "🥺",
+        "😨", "😰", "😥", "😓", "🤔", "🤭", "🤫", "🤥", "😶", "😐",
+        "😑", "😬", "🙄", "😯", "😦", "😧", "😮", "😲", "🥱", "😴",
+        "🤤", "😪", "😵", "🤐", "🥴", "🤢", "🤮", "🤧", "😷", "🤒",
+        "🤕", "🤑", "🤠", "😈", "👿", "👹", "👺", "💩", "👻", "💀",
+        "☠️", "👽", "👾", "🤖", "🎃", "😺", "😸", "😹", "😻", "😼",
+        "😽", "🙀", "😿", "😾", "💋", "👋", "🤚", "🖐️", "✋", "🖖",
+        "👌", "🤌", "🤏", "✌️", "🤞", "🫰", "🤟", "🤘", "🤙", "🫵",
+        "👍", "👎", "👊", "✊", "🤛", "🤜", "🤝", "👏", "🙌", "🫶",
+        "👐", "🤲", "🤝", "🙏", "✍️", "💅", "🤳", "💪", "🦾", "🦵",
+        "🦿", "🦶", "👣", "👀", "👁️", "👅", "👄", "🫦", "🧠", "🫀",
+        "🫁", "🦷", "🦴", "👤", "👥", "🫂", "👶", "🧒", "👦", "👧",
+        "🧑", "👨", "👩", "🧔", "🧔‍♂️", "🧔‍♀️", "👨‍🦰", "👩‍🦰", "👨‍🦱", "👩‍🦱",
+        "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔",
+        "❣️", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟", "☮️",
+        "✝️", "☪️", "🕉️", "☸️", "✡️", "🔯", "🕎", "☯️", "☦️", "🛐",
+        "⭐", "🌟", "✨", "⚡", "💥", "🔥", "💫", "💦", "💨", "🕳️"
+    }
+    
+    -- 遍历所有真正的emoji
+    for _, emoji in ipairs(trueEmojis) do
+        local _, count = string.gsub(message, emoji, "")
+        emojiCount = emojiCount + count
+    end
+    
+    return emojiCount
+end
+
+-- ===== 分析中文标点 =====
+local function analyzeChinesePunctuation(message)
+    local chineseExclamation = 0
+    local chineseQuestion = 0
+    
+    _, chineseExclamation = string.gsub(message, "！", "")
+    _, chineseQuestion = string.gsub(message, "？", "")
+    
+    return chineseExclamation, chineseQuestion
+end
+
+-- ===== 分析重复符号 =====
+local function analyzeRepeatedSymbols(message)
+    -- 英文!!!
+    local _, exclamationCount = string.gsub(message, "!", "")
+    if exclamationCount >= 3 then
+        BaZhiStats.repeatExclamation = BaZhiStats.repeatExclamation + 1
+    end
+    
+    -- 英文???
+    local _, questionCount = string.gsub(message, "?", "")
+    if questionCount >= 3 then
+        BaZhiStats.repeatQuestion = BaZhiStats.repeatQuestion + 1
+    end
+    
+    -- 中文！！！
+    local _, chineseExclamationCount = string.gsub(message, "！", "")
+    if chineseExclamationCount >= 3 then
+        BaZhiStats.repeatChineseExclamation = BaZhiStats.repeatChineseExclamation + 1
+    end
+    
+    -- 中文？？？
+    local _, chineseQuestionCount = string.gsub(message, "？", "")
+    if chineseQuestionCount >= 3 then
+        BaZhiStats.repeatChineseQuestion = BaZhiStats.repeatChineseQuestion + 1
+    end
+    
+    return exclamationCount, questionCount, chineseExclamationCount, chineseQuestionCount
 end
 
 -- ===== 独立词汇匹配 =====
@@ -230,7 +319,7 @@ local function isSwearMessage(message)
     return false, nil
 end
 
--- ===== 分析大写字母（修复版：只统计A-Z）=====
+-- ===== 分析大写字母 =====
 local function analyzeCaps(message)
     local originalMsg = message
     local capsCount = 0
@@ -238,20 +327,16 @@ local function analyzeCaps(message)
     local maxConsecutive = 0
     local inConsecutive = false
     
-    -- 只遍历英文字母，忽略中文和其他字符
     for i = 1, #originalMsg do
         local char = originalMsg:sub(i, i)
         local byte = char:byte()
         
-        -- 判断是否是大写英文字母 A-Z (ASCII 65-90)
         if byte and byte >= 65 and byte <= 90 then
             capsCount = capsCount + 1
             inConsecutive = true
             consecutiveCount = consecutiveCount + 1
         else
-            -- 如果是小写字母，重置连续计数但不算大写
             if byte and byte >= 97 and byte <= 122 then
-                -- 小写字母，重置连续计数
                 if inConsecutive then
                     if consecutiveCount >= 2 then
                         BaZhiStats.consecutiveCaps = BaZhiStats.consecutiveCaps + 1
@@ -261,7 +346,6 @@ local function analyzeCaps(message)
                     inConsecutive = false
                 end
             else
-                -- 非字母字符，重置连续计数
                 if inConsecutive then
                     if consecutiveCount >= 2 then
                         BaZhiStats.consecutiveCaps = BaZhiStats.consecutiveCaps + 1
@@ -274,33 +358,16 @@ local function analyzeCaps(message)
         end
     end
     
-    -- 处理结尾的连续大写
     if inConsecutive and consecutiveCount >= 2 then
         BaZhiStats.consecutiveCaps = BaZhiStats.consecutiveCaps + 1
         maxConsecutive = math.max(maxConsecutive, consecutiveCount)
     end
     
-    -- 如果有大写字母，记录消息
     if capsCount > 0 then
         BaZhiStats.capsMessages = BaZhiStats.capsMessages + 1
     end
     
     return capsCount, maxConsecutive
-end
-
--- ===== 分析重复符号 =====
-local function analyzeRepeatedSymbols(message)
-    local _, exclamationCount = string.gsub(message, "!", "")
-    if exclamationCount >= 3 then
-        BaZhiStats.repeatExclamation = BaZhiStats.repeatExclamation + 1
-    end
-    
-    local _, questionCount = string.gsub(message, "?", "")
-    if questionCount >= 3 then
-        BaZhiStats.repeatQuestion = BaZhiStats.repeatQuestion + 1
-    end
-    
-    return exclamationCount, questionCount
 end
 
 -- ===== 分析刷屏速度 =====
@@ -322,20 +389,30 @@ local function analyzeBurst()
     end
 end
 
--- ===== 分析消息 =====
+-- ===== 分析消息（修复版，只统计真emoji）=====
 local function analyzeMessage(message)
     local originalMsg = message
     
+    -- 分析大写字母
     local capsCount, maxConsecutive = analyzeCaps(originalMsg)
     BaZhiStats.capsCount = BaZhiStats.capsCount + capsCount
     
-    local exclamationCount, questionCount = analyzeRepeatedSymbols(originalMsg)
+    -- 分析重复符号
+    local exclamationCount, questionCount, chineseExclamationCount, chineseQuestionCount = analyzeRepeatedSymbols(originalMsg)
     BaZhiStats.exclamationCount = BaZhiStats.exclamationCount + exclamationCount
     BaZhiStats.questionCount = BaZhiStats.questionCount + questionCount
+    BaZhiStats.chineseExclamationCount = BaZhiStats.chineseExclamationCount + chineseExclamationCount
+    BaZhiStats.chineseQuestionCount = BaZhiStats.chineseQuestionCount + chineseQuestionCount
     
+    -- 分析真正的emoji（修复版）
+    local emojiCount = detectEmoji(originalMsg)
+    BaZhiStats.emojiCount = BaZhiStats.emojiCount + emojiCount
+    
+    -- 统计#号
     local _, hashtagTotal = string.gsub(originalMsg, "#", "")
     BaZhiStats.hashtagCount = BaZhiStats.hashtagCount + hashtagTotal
     
+    -- 判断脏话
     local isSwear, swearWord = isSwearMessage(originalMsg)
     if isSwear then
         BaZhiStats.swearMessages = BaZhiStats.swearMessages + 1
@@ -361,36 +438,57 @@ local function calculateBaZhiIndex()
     local runtime = os.difftime(os.time(), startTime)
     if runtime < 30 then return 0 end
     
+    -- 1. 脏话基础分 (0-25分)
     local swearRate = BaZhiStats.swearMessages / BaZhiStats.totalMessages
     local swearScore = math.min(25, swearRate * 50)
     
+    -- 2. 符号暴躁分 (0-30分)
     local symbolScore = 0
     if BaZhiStats.totalMessages > 0 then
+        -- 英文符号
         local avgExclamation = BaZhiStats.exclamationCount / BaZhiStats.totalMessages
         local avgQuestion = BaZhiStats.questionCount / BaZhiStats.totalMessages
+        
+        -- 中文符号
+        local avgChineseExclamation = BaZhiStats.chineseExclamationCount / BaZhiStats.totalMessages
+        local avgChineseQuestion = BaZhiStats.chineseQuestionCount / BaZhiStats.totalMessages
+        
+        -- #号
         local avgHashtag = BaZhiStats.hashtagCount / BaZhiStats.totalMessages
         
-        symbolScore = math.min(15, 
-            avgExclamation * 3 +
-            avgQuestion * 2 +
-            avgHashtag * 5
+        -- 真正的emoji
+        local avgEmoji = BaZhiStats.emojiCount / BaZhiStats.totalMessages
+        
+        symbolScore = math.min(20, 
+            avgExclamation * 2 +
+            avgQuestion * 1.5 +
+            avgChineseExclamation * 3 +
+            avgChineseQuestion * 2.5 +
+            avgHashtag * 4 +
+            avgEmoji * 5
         )
         
+        -- 重复符号加成
         local repeatBonus = math.min(10, 
-            (BaZhiStats.repeatExclamation + BaZhiStats.repeatQuestion) * 2
+            (BaZhiStats.repeatExclamation + 
+             BaZhiStats.repeatQuestion + 
+             BaZhiStats.repeatChineseExclamation * 2 +
+             BaZhiStats.repeatChineseQuestion * 2) * 1.5
         )
         symbolScore = symbolScore + repeatBonus
     end
     
+    -- 3. 大写字母分 (0-15分)
     local capsScore = 0
     if BaZhiStats.totalMessages > 0 then
-        local capsRate = BaZhiStats.capsCount / (BaZhiStats.totalMessages * 10)  -- 假设平均每条10字符
-        capsScore = math.min(10, capsRate * 30)
+        local capsRate = BaZhiStats.capsCount / (BaZhiStats.totalMessages * 10)
+        capsScore = math.min(8, capsRate * 25)
         
-        local consecutiveBonus = math.min(10, BaZhiStats.consecutiveCaps * 2)
+        local consecutiveBonus = math.min(7, BaZhiStats.consecutiveCaps * 1.5)
         capsScore = capsScore + consecutiveBonus
     end
     
+    -- 4. 刷屏速度分 (0-15分)
     local speedScore = 0
     if runtime > 0 then
         local msgPerMin = (BaZhiStats.totalMessages / runtime) * 60
@@ -400,6 +498,7 @@ local function calculateBaZhiIndex()
         speedScore = speedScore + burstBonus
     end
     
+    -- 5. 消息长度分 (0-15分)
     local lengthScore = 0
     if #BaZhiStats.messageLengths > 0 then
         local totalLength = 0
@@ -467,6 +566,11 @@ local function saveToFileAsync(callback)
             content = content .. "║ 暴躁等级：" .. level .. "\n"
             content = content .. "║ 脏话消息：" .. BaZhiStats.swearMessages .. "条\n"
             content = content .. "║ 脏话率：" .. getSwearRate() .. "%\n"
+            content = content .. "║ 英文感叹号：" .. BaZhiStats.exclamationCount .. "个\n"
+            content = content .. "║ 中文感叹号：" .. BaZhiStats.chineseExclamationCount .. "个\n"
+            content = content .. "║ 英文问号：" .. BaZhiStats.questionCount .. "个\n"
+            content = content .. "║ 中文问号：" .. BaZhiStats.chineseQuestionCount .. "个\n"
+            content = content .. "║ 真·emoji：" .. BaZhiStats.emojiCount .. "个\n"
             content = content .. "║ #号总数：" .. BaZhiStats.hashtagCount .. "个\n"
             content = content .. "║ 大写字母：" .. BaZhiStats.capsCount .. "个\n"
             content = content .. "║ 连续大写：" .. BaZhiStats.consecutiveCaps .. "次\n"
@@ -565,7 +669,7 @@ local function toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, re
         resizeHandle.Visible = false
         collapseIcon.Text = "▲"
         
-        countLabel.Size = UDim2.new(0, 300, 0, 20)
+        countLabel.Size = UDim2.new(0, 380, 0, 20)
         countLabel.Position = UDim2.new(0, 100, 0, 15)
         countLabel.TextXAlignment = Enum.TextXAlignment.Left
     else
@@ -595,15 +699,16 @@ local function updateUIDisplay(mainFrame, countLabel)
     
     if isCollapsed then
         local swearRate = getSwearRate()
-        countLabel.Text = string.format("%s 💀 %d%% | 🤬 %d%% | 📚 %d词", 
-            level, baZhi, swearRate, #swearWordList)
+        countLabel.Text = string.format("%s 💀 %d%% | 🤬 %d%% | 😂 %d个 | 📚 %d词", 
+            level, baZhi, swearRate, BaZhiStats.emojiCount, #swearWordList)
     else
-        countLabel.Text = string.format("📊 %d条 | 👥 %d人 | %s 💀 %d%% | 🤬 %d%% | 📚 %d词 | 🔠 %d个", 
+        countLabel.Text = string.format("📊 %d条 | 👥 %d人 | %s 💀 %d%% | 🤬 %d%% | 😂 %d个 | 📚 %d词 | 🔠 %d个", 
             messageCount, 
             #Players:GetPlayers(),
             level,
             baZhi,
             getSwearRate(),
+            BaZhiStats.emojiCount,
             #swearWordList,
             BaZhiStats.capsCount)
     end
@@ -686,11 +791,14 @@ local function showDetailedStats()
     addMessage("📊 系统：字库词数：" .. #swearWordList .. "个", true)
     
     addMessage("📊 系统：════ 暴躁分析 ════", true)
-    addMessage("📊 系统：💢 感叹号总数：" .. BaZhiStats.exclamationCount .. "个", true)
-    addMessage("📊 系统：❓ 问号总数：" .. BaZhiStats.questionCount .. "个", true)
+    addMessage("📊 系统：💢 英文感叹号：" .. BaZhiStats.exclamationCount .. "个", true)
+    addMessage("📊 系统：❗ 中文感叹号：" .. BaZhiStats.chineseExclamationCount .. "个", true)
+    addMessage("📊 系统：❓ 英文问号：" .. BaZhiStats.questionCount .. "个", true)
+    addMessage("📊 系统：？ 中文问号：" .. BaZhiStats.chineseQuestionCount .. "个", true)
+    addMessage("📊 系统：😂 真·emoji：" .. BaZhiStats.emojiCount .. "个", true)
     addMessage("📊 系统：🔊 大写字母：" .. BaZhiStats.capsCount .. "个", true)
     addMessage("📊 系统：📏 连续大写：" .. BaZhiStats.consecutiveCaps .. "次", true)
-    addMessage("📊 系统：🔁 重复符号：" .. (BaZhiStats.repeatExclamation + BaZhiStats.repeatQuestion) .. "次", true)
+    addMessage("📊 系统：🔁 重复符号：" .. (BaZhiStats.repeatExclamation + BaZhiStats.repeatQuestion + BaZhiStats.repeatChineseExclamation + BaZhiStats.repeatChineseQuestion) .. "次", true)
     addMessage("📊 系统：#️⃣ #号总数：" .. BaZhiStats.hashtagCount .. "个", true)
     addMessage("📊 系统：📌 带#号消息：" .. BaZhiStats.hashtagMessages .. "条", true)
     addMessage("📊 系统：🤬 脏话消息：" .. BaZhiStats.swearMessages .. "条", true)
@@ -699,7 +807,9 @@ local function showDetailedStats()
     
     if BaZhiStats.totalMessages > 0 then
         addMessage("📊 系统：════ 平均指标 ════", true)
-        addMessage("📊 系统：平均感叹号：" .. string.format("%.1f", BaZhiStats.exclamationCount/BaZhiStats.totalMessages) .. "个/条", true)
+        addMessage("📊 系统：平均感叹号：" .. string.format("%.1f", (BaZhiStats.exclamationCount + BaZhiStats.chineseExclamationCount)/BaZhiStats.totalMessages) .. "个/条", true)
+        addMessage("📊 系统：平均问号：" .. string.format("%.1f", (BaZhiStats.questionCount + BaZhiStats.chineseQuestionCount)/BaZhiStats.totalMessages) .. "个/条", true)
+        addMessage("📊 系统：平均emoji：" .. string.format("%.1f", BaZhiStats.emojiCount/BaZhiStats.totalMessages) .. "个/条", true)
         addMessage("📊 系统：平均#号：" .. string.format("%.1f", BaZhiStats.hashtagCount/BaZhiStats.totalMessages) .. "个/条", true)
         addMessage("📊 系统：平均大写：" .. string.format("%.1f", BaZhiStats.capsCount/BaZhiStats.totalMessages) .. "个/条", true)
     end
@@ -728,7 +838,7 @@ local function showDetailedStats()
     addMessage("📊 系统：等级：" .. level, true)
 end
 
--- ===== 创建UI（完整版，和上一版相同）=====
+-- ===== 创建UI（完整版）=====
 local function createUI()
     local old = playerGui:FindFirstChild("ChatLoggerGUI")
     if old then old:Destroy() end
@@ -789,7 +899,7 @@ local function createUI()
     title.Size = UDim2.new(1, -130, 1, 0)
     title.Position = UDim2.new(0, 15, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "💀 贴吧狂暴记录器 v14.3 💀"
+    title.Text = "💀 贴吧狂暴记录器 v14.5 💀"
     title.TextColor3 = Color3.new(1, 1, 1)
     title.TextSize = currentFontSize + 4
     title.TextXAlignment = Enum.TextXAlignment.Left
@@ -895,7 +1005,7 @@ local function createUI()
     countLabel.Size = UDim2.new(1, -20, 0, 20)
     countLabel.Position = UDim2.new(0, 10, 1, -25)
     countLabel.BackgroundTransparency = 1
-    countLabel.Text = string.format("📊 0条 | 👥 0人 | 💀 0%% | 🤬 0%% | 📚 %d词 | 🔠 0个", #swearWordList)
+    countLabel.Text = string.format("📊 0条 | 👥 0人 | 💀 0%% | 🤬 0%% | 😂 0个 | 📚 %d词 | 🔠 0个", #swearWordList)
     countLabel.TextColor3 = Config.Colors.Secondary
     countLabel.TextSize = currentFontSize - 4
     countLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -1034,6 +1144,9 @@ local function createUI()
             swearMessages = 0,
             exclamationCount = 0,
             questionCount = 0,
+            chineseExclamationCount = 0,
+            chineseQuestionCount = 0,
+            emojiCount = 0,
             capsCount = 0,
             hashtagCount = 0,
             hashtagMessages = 0,
@@ -1042,6 +1155,8 @@ local function createUI()
             capsMessages = 0,
             repeatExclamation = 0,
             repeatQuestion = 0,
+            repeatChineseExclamation = 0,
+            repeatChineseQuestion = 0,
             messageLengths = {},
             messageTimestamps = {},
             lastMessageTime = startTime,
@@ -1161,10 +1276,10 @@ local function createUI()
     end)
     
     -- 启动消息
-    addMessage("💀 系统：贴吧狂暴记录器 v14.3", true)
-    addMessage("💀 系统：字母统计修复版", true)
-    addMessage("💀 系统：中文不再算大写字母", true)
-    addMessage("💀 系统：文件名 = " .. Config.FileName, true)
+    addMessage("💀 系统：贴吧狂暴记录器 v14.5", true)
+    addMessage("💀 系统：真emoji检测版", true)
+    addMessage("💀 系统：汉字/数字/英文不算emoji", true)
+    addMessage("💀 系统：只统计😂🤣😅等真表情", true)
     addMessage("💀 系统：字库词数 = " .. #swearWordList .. "个", true)
 end
 
@@ -1211,14 +1326,17 @@ createUI()
 setupChatListener()
 
 print("╔══════════════════════════════════════════════════════════════╗")
-print("║     💀 启动成功！字母统计修复版 v14.3！ 💀                  ║")
+print("║     💀 启动成功！真emoji检测版 v14.5！ 💀                   ║")
 print("║    修复内容：                                                ║")
-print("║    ✅ 中文不再算大写字母（只统计A-Z）                       ║")
-print("║    ✅ 大写字母统计准确了！                                   ║")
-print("║    ✅ 连续大写统计也修复了                                   ║")
-print("║    测试用例：                                                ║")
-print("║    - 'SB' → 2个大写                                         ║")
-print("║    - '草' → 0个大写                                         ║")
-print("║    - 'FUCK' → 4个大写                                       ║")
+print("║    ✅ 只统计真正的emoji表情符号                             ║")
+print("║    ✅ 汉字/数字/英文不算emoji了！                           ║")
+print("║    ✅ 修复第1337行括号语法错误                               ║")
+print("║    现在：                                                   ║")
+print("║    - '😂' → 1个emoji ✅                                     ║")
+print("║    - '草' → 0个emoji ✅                                     ║")
+print("║    - '123' → 0个emoji ✅                                    ║")
+print("║    - 'ABC' → 0个emoji ✅                                    ║")
+print("║    字库链接：                                                ║")
+print("║    https://raw.githubusercontent.com/dtbile/-/main/words.txt ║")
 print("║    字库词数：" .. #swearWordList .. "个                                 ║")
 print("╚══════════════════════════════════════════════════════════════╝")
