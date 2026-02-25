@@ -1,1342 +1,1308 @@
 --[[
-╔════════════════════════════════════════════════════════════════════════════╗
-║     💀 贴吧狂暴·聊天记录器·真emoji检测版 v14.5 💀                        ║
-║     修复内容：                                                             ║
-║     ✅ 只统计真正的emoji（😂🤣😅等）                                     ║
-║     ✅ 汉字/数字/英文不算emoji了！                                        ║
-║     ✅ 修复第1337行括号语法错误                                            ║
-║     字库地址：https://raw.githubusercontent.com/dtbile/-/main/words.txt   ║
-╚════════════════════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════╗
+║  💀 贴吧狂暴记录器 v1.0.4 + Detector v4.0 一键完整版 💀                 ║
+║  ✅ 不覆盖 OnIncomingMessage（避免冲突）                                ║
+║  ✅ 多路抓聊天：TCS.MessageReceived + DefaultChatEvents + Chatted       ║
+║  ✅ Detector 扫描作为脏话判定/评分来源（更抗绕过）                       ║
+║  ✅ 全功能：过滤/菜单/名单静音/保存导出复制/折叠/置顶/搜索/统计          ║
+╚══════════════════════════════════════════════════════════════════════╝
 --]]
 
 repeat task.wait() until game:GetService("Players").LocalPlayer
 
+-- ===== Services =====
 local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local okTCS, TextChatService = pcall(function() return game:GetService("TextChatService") end)
+if not okTCS then TextChatService = nil end
+
 local localPlayer = Players.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui")
 
--- ===== 配置 =====
+-- ===== 你只需要改这里 =====
+local DETECTOR_URL = "https://raw.githubusercontent.com/dtbile/-/refs/heads/main/words.txt" -- Detector引擎（return Detector）
+local WORDS_TABLE_URL = "" -- 你的字库 raw（必须 return table），没有就留空用内置fallback
+-- ======================
+
+-- ===== Config =====
 local Config = {
+    Version = "v1.0.4+Detector",
     FileName = "贴吧聊天记录.txt",
-    BackupName = "聊天记录_" .. os.date("%Y%m%d") .. ".txt",
-    MaxMessages = 1000,
-    FontSize = 18,
-    Vibrate = true,
-    MinWidth = 300,
-    MinHeight = 80,
-    MaxWidth = 800,
-    MaxHeight = 1000,
-    DefaultWidth = 420,
-    DefaultHeight = 600,
-    CollapsedHeight = 80,
+
+    MaxHistory = 3000,
+    MaxRender = 260,
+    RenderQueueMax = 1200,
+    AutoSaveInterval = 180,
     SaveTimeout = 3,
+
+    DefaultWidth = 500,
+    DefaultHeight = 700,
+    MinWidth = 360,
+    MinHeight = 160,
+    MaxWidth = 980,
+    MaxHeight = 1100,
+    CollapsedHeight = 96,
+
+    FontSize = 18,
+    SmoothAnimations = true,
+    StatsUpdateHz = 4,
+
+    WindowSeconds = 180,
+    WindowMaxMessages = 160,
+
     Colors = {
-        Primary = Color3.fromRGB(255, 45, 85),
+        Primary   = Color3.fromRGB(255, 45, 85),
         Secondary = Color3.fromRGB(0, 255, 255),
-        Accent = Color3.fromRGB(255, 215, 0),
-        Background = Color3.fromRGB(5, 5, 15),
-        Text = Color3.fromRGB(255, 255, 255),
-        System = Color3.fromRGB(255, 215, 0),
+        Accent    = Color3.fromRGB(255, 215, 0),
+        Background= Color3.fromRGB(5, 5, 15),
+        Panel     = Color3.fromRGB(12, 12, 20),
+        Text      = Color3.fromRGB(255, 255, 255),
+        System    = Color3.fromRGB(255, 215, 0),
+        Muted     = Color3.fromRGB(130, 130, 130),
+        Danger    = Color3.fromRGB(255, 60, 60),
+        Success   = Color3.fromRGB(0, 200, 0),
+        Dim       = Color3.fromRGB(160, 160, 160),
     }
 }
 
--- ===== 全局变量 =====
-local chatHistory = {}
-local messageStats = {}
-local uiVisible = true
-local isCollapsed = false
-local dragging = false
-local resizing = false
-local dragOffset = Vector2.new()
-local resizeStart = Vector2.new()
-local resizeStartSize = Vector2.new()
-local currentFontSize = Config.FontSize
-local currentWidth = Config.DefaultWidth
-local currentHeight = Config.DefaultHeight
-local glowIntensity = 0
-local resizeHandleSize = 20
-local messageCount = 0
-local startTime = os.time()
-local swearWordList = {}
-local isSaving = false
-
--- ===== 暴躁统计 =====
-local BaZhiStats = {
-    swearMessages = 0,
-    exclamationCount = 0,
-    questionCount = 0,
-    chineseExclamationCount = 0,
-    chineseQuestionCount = 0,
-    emojiCount = 0,
-    capsCount = 0,
-    hashtagCount = 0,
-    hashtagMessages = 0,
-    totalMessages = 0,
-    consecutiveCaps = 0,
-    capsMessages = 0,
-    repeatExclamation = 0,
-    repeatQuestion = 0,
-    repeatChineseExclamation = 0,
-    repeatChineseQuestion = 0,
-    messageLengths = {},
-    messageTimestamps = {},
-    lastMessageTime = 0,
-    burstCount = 0,
+local Features = {
+    showPlayers = true,
+    showRuntime = true,
+    showWordCount = true, -- 显示词库词数（如果你给了words table）
+    showSwearRate = true,
+    smoothAnimations = true,
 }
 
--- ===== 远程加载字库 =====
-local function loadSwearWords()
-    local url = "https://raw.githubusercontent.com/dtbile/-/main/words.txt"
-    
-    local success, data = pcall(function()
-        return game:HttpGet(url)
-    end)
-    
-    if not success or not data then
-        warn("💀 联网失败，使用本地备份词库")
-        return {
-            "草","靠","日","特么","尼玛","SB","傻逼","垃圾","废物","滚",
-            "操","肏","艹","妈","爹","爷","爬","怼","淦","狗屎","狗屁",
-            "放屁","扯淡","瞎扯","胡扯","胡说","胡闹","恶心","变态",
-            "畸形","奇葩","沙雕","逗比","2B","250","你妈","你吗","你妹",
-            "你丫","麻痹","妈批","妈卖批","MLGB","NMSL","WQNMLGB"
-        }
+local CategoryFilter = {
+    showCHAT = true,
+    showSYSTEM = true,
+
+    SYS_START = true,
+    SYS_CHATFLOW = true,
+    SYS_JOINLEAVE = true,
+    SYS_STATS = true,
+    SYS_SAVE = true,
+    SYS_EXPORT = true,
+    SYS_HINT = true,
+}
+
+-- ===== Utils =====
+local function clamp(n,a,b) if n<a then return a elseif n>b then return b else return n end end
+local function nowStr() return os.date("%Y-%m-%d %H:%M:%S") end
+local function nz(x, d) if type(x)=="number" then return x else return d or 0 end end
+
+local function tween(obj, t, props)
+    if not obj then return end
+    if not Config.SmoothAnimations or not Features.smoothAnimations then
+        for k,v in pairs(props) do obj[k]=v end
+        return
     end
-    
-    local success2, wordsTable = pcall(function()
-        return loadstring(data)()
-    end)
-    
-    if not success2 or not wordsTable then
-        warn("💀 字库加载失败，使用本地备份")
-        return {
-            "草","靠","日","特么","尼玛","SB","傻逼","垃圾","废物","滚",
-            "操","肏","艹","妈","爹","爷","爬","怼","淦"
-        }
+    TweenService:Create(obj, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+end
+
+local function safeLoadFromUrl(url)
+    if not url or url=="" then return nil, "empty url" end
+    local ok, src = pcall(function() return game:HttpGet(url) end)
+    if not ok or type(src)~="string" then return nil, "httpget failed" end
+    local ok2, mod = pcall(function() return loadstring(src)() end)
+    if not ok2 then return nil, "loadstring failed" end
+    return mod, nil
+end
+
+-- ===== Load Detector + Words Table =====
+local Detector = nil
+do
+    local mod = select(1, safeLoadFromUrl(DETECTOR_URL))
+    if type(mod)=="table" and type(mod.new)=="function" and type(mod.scan)=="function" then
+        Detector = mod
     end
-    
-    local allWords = {}
-    local categoryCount = 0
-    local wordCount = 0
-    
-    for category, wordList in pairs(wordsTable) do
-        categoryCount = categoryCount + 1
-        if type(wordList) == "table" then
-            for _, word in ipairs(wordList) do
-                table.insert(allWords, word)
-                wordCount = wordCount + 1
+end
+
+-- fallback words table（保证能跑；建议你换成自己的 full 字库 raw）
+local FALLBACK_WORDS = {
+    chinese_basic = {"草","操","艹","肏","日","靠","滚","爬","怼","淦","妈","爹","爷","傻逼","垃圾","废物","狗屎","狗屁"},
+    abbrev = {"sb","cnm","nmsl","tmd","wdnmd","mlgb","wqnmlgb"},
+    leet = {"c4o","ca0","f**k","fuk","fk","sh1t","b1tch","bi7ch"},
+    memes = {"💀","🤡","🐶","👽"},
+}
+
+local wordsTable = nil
+do
+    if WORDS_TABLE_URL ~= "" then
+        local mod = select(1, safeLoadFromUrl(WORDS_TABLE_URL))
+        if type(mod)=="table" then wordsTable = mod end
+    end
+    if not wordsTable then wordsTable = FALLBACK_WORDS end
+end
+
+local det = nil
+local totalWordCount = 0
+if Detector then
+    local ok, inst = pcall(function() return Detector.new(wordsTable) end)
+    if ok then det = inst end
+end
+do
+    local c=0
+    for _,list in pairs(wordsTable) do
+        if type(list)=="table" then c += #list end
+    end
+    totalWordCount=c
+end
+
+-- ===== State =====
+local state = {
+    chatHistory = {},
+    renderQueue = {},
+    messageStats = {},
+    mutedPlayers = {},
+    isSaving = false,
+
+    startTime = os.time(),
+    uiVisible = true,
+    isCollapsed = false,
+    pinned = "BR",
+
+    fontSize = Config.FontSize,
+    width = Config.DefaultWidth,
+    height = Config.DefaultHeight,
+}
+
+-- ===== Window buffer =====
+local Window = { items = {} } -- {t=os.time(), meta={...}}
+
+local function windowPrune(nowT)
+    local cutoff = nowT - Config.WindowSeconds
+    while #Window.items > 0 and Window.items[1].t < cutoff do table.remove(Window.items,1) end
+    while #Window.items > Config.WindowMaxMessages do table.remove(Window.items,1) end
+end
+
+local function windowAdd(meta)
+    local nowT = os.time()
+    table.insert(Window.items, {t = nowT, meta = meta})
+    windowPrune(nowT)
+end
+
+-- ===== Detector scan wrapper =====
+local function scanText(text)
+    if not det then
+        return {hit=false, score=0, level="clean", matches={}}
+    end
+    local ok, r = pcall(function() return det:scan(text) end)
+    if ok and type(r)=="table" then
+        r.hit = (r.hit == true)
+        r.score = nz(r.score,0)
+        r.level = tostring(r.level or "clean")
+        return r
+    end
+    return {hit=false, score=0, level="clean", matches={}}
+end
+
+-- ===== Analysis / BaZhi =====
+local quickEmojis = {"😂","🤣","😭","😡","🤬","💀","🔥","💯","👽","🦶","😤","😎","🙏","✅","❌","⚡","⭐","✨","💥","💩"}
+local function detectEmojiCount(msg)
+    local c=0
+    for _,e in ipairs(quickEmojis) do
+        local _,n = msg:gsub(e,"")
+        c += n
+    end
+    return c
+end
+
+local function countPattern(msg, pat)
+    local _,n = msg:gsub(pat,"")
+    return n
+end
+
+local function detectRepeatBurst(msg)
+    local ok, burst = pcall(function()
+        local last=nil
+        local streak=0
+        local hits=0
+        for _, code in utf8.codes(msg) do
+            local ch = utf8.char(code)
+            if ch == last then
+                streak += 1
+            else
+                if streak >= 5 then hits += 1 end
+                last = ch
+                streak = 1
             end
         end
-    end
-    
-    print(string.format("💀 远程字库加载成功！共 %d 个分类，%d 个词", categoryCount, wordCount))
-    return allWords
+        if streak >= 5 then hits += 1 end
+        return hits
+    end)
+    if ok then return burst end
+    return 0
 end
 
-swearWordList = loadSwearWords()
-BaZhiStats.lastMessageTime = startTime
+local function analyzeChatMessage(rawLine)
+    -- rawLine: "name：msg"
+    local ex  = countPattern(rawLine,"!") + countPattern(rawLine,"！")
+    local qu  = countPattern(rawLine,"%?") + countPattern(rawLine,"？")
+    local hash= countPattern(rawLine,"#")
+    local emoji = detectEmojiCount(rawLine)
+    local repeatBurst = detectRepeatBurst(rawLine)
 
--- ===== 获取时间 =====
-local function getTime()
-    return os.date("%Y-%m-%d %H:%M:%S")
-end
+    -- 核心：用 Detector 判定脏话/评分
+    local r = scanText(rawLine)
 
--- ===== 真正的emoji检测（修复版）=====
-local function detectEmoji(message)
-    local emojiCount = 0
-    
-    -- 常见emoji列表（只统计真正的表情符号）
-    local trueEmojis = {
-        "😂", "🤣", "😅", "😆", "😭", "😱", "🤬", "💀", "🔥", "💯",
-        "😊", "😄", "😃", "😀", "😁", "😆", "😅", "😂", "🤣", "😭",
-        "😢", "😤", "😠", "🤬", "😡", "🥵", "🥶", "🤯", "😳", "🥺",
-        "😨", "😰", "😥", "😓", "🤔", "🤭", "🤫", "🤥", "😶", "😐",
-        "😑", "😬", "🙄", "😯", "😦", "😧", "😮", "😲", "🥱", "😴",
-        "🤤", "😪", "😵", "🤐", "🥴", "🤢", "🤮", "🤧", "😷", "🤒",
-        "🤕", "🤑", "🤠", "😈", "👿", "👹", "👺", "💩", "👻", "💀",
-        "☠️", "👽", "👾", "🤖", "🎃", "😺", "😸", "😹", "😻", "😼",
-        "😽", "🙀", "😿", "😾", "💋", "👋", "🤚", "🖐️", "✋", "🖖",
-        "👌", "🤌", "🤏", "✌️", "🤞", "🫰", "🤟", "🤘", "🤙", "🫵",
-        "👍", "👎", "👊", "✊", "🤛", "🤜", "🤝", "👏", "🙌", "🫶",
-        "👐", "🤲", "🤝", "🙏", "✍️", "💅", "🤳", "💪", "🦾", "🦵",
-        "🦿", "🦶", "👣", "👀", "👁️", "👅", "👄", "🫦", "🧠", "🫀",
-        "🫁", "🦷", "🦴", "👤", "👥", "🫂", "👶", "🧒", "👦", "👧",
-        "🧑", "👨", "👩", "🧔", "🧔‍♂️", "🧔‍♀️", "👨‍🦰", "👩‍🦰", "👨‍🦱", "👩‍🦱",
-        "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔",
-        "❣️", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟", "☮️",
-        "✝️", "☪️", "🕉️", "☸️", "✡️", "🔯", "🕎", "☯️", "☦️", "🛐",
-        "⭐", "🌟", "✨", "⚡", "💥", "🔥", "💫", "💦", "💨", "🕳️"
+    return {
+        len=#rawLine,
+        ex=ex, qu=qu, hash=hash,
+        emoji=emoji,
+        repeatBurst=repeatBurst,
+
+        swear = r.hit,
+        detScore = nz(r.score,0),
     }
-    
-    -- 遍历所有真正的emoji
-    for _, emoji in ipairs(trueEmojis) do
-        local _, count = string.gsub(message, emoji, "")
-        emojiCount = emojiCount + count
-    end
-    
-    return emojiCount
 end
 
--- ===== 分析中文标点 =====
-local function analyzeChinesePunctuation(message)
-    local chineseExclamation = 0
-    local chineseQuestion = 0
-    
-    _, chineseExclamation = string.gsub(message, "！", "")
-    _, chineseQuestion = string.gsub(message, "？", "")
-    
-    return chineseExclamation, chineseQuestion
-end
+local function computeBaZhi()
+    local nowT = os.time()
+    windowPrune(nowT)
+    local n = #Window.items
+    if n < 2 then return 0 end
 
--- ===== 分析重复符号 =====
-local function analyzeRepeatedSymbols(message)
-    -- 英文!!!
-    local _, exclamationCount = string.gsub(message, "!", "")
-    if exclamationCount >= 3 then
-        BaZhiStats.repeatExclamation = BaZhiStats.repeatExclamation + 1
-    end
-    
-    -- 英文???
-    local _, questionCount = string.gsub(message, "?", "")
-    if questionCount >= 3 then
-        BaZhiStats.repeatQuestion = BaZhiStats.repeatQuestion + 1
-    end
-    
-    -- 中文！！！
-    local _, chineseExclamationCount = string.gsub(message, "！", "")
-    if chineseExclamationCount >= 3 then
-        BaZhiStats.repeatChineseExclamation = BaZhiStats.repeatChineseExclamation + 1
-    end
-    
-    -- 中文？？？
-    local _, chineseQuestionCount = string.gsub(message, "？", "")
-    if chineseQuestionCount >= 3 then
-        BaZhiStats.repeatChineseQuestion = BaZhiStats.repeatChineseQuestion + 1
-    end
-    
-    return exclamationCount, questionCount, chineseExclamationCount, chineseQuestionCount
-end
+    local swearMsgs=0
+    local sumPunct=0
+    local sumHash=0
+    local sumEmoji=0
+    local sumRepeat=0
+    local sumDet=0
 
--- ===== 独立词汇匹配 =====
-local function isIndependentWord(message, word)
-    if not word or word == "" then return false end
-    
-    if word == "#" then
-        return message:find("#") ~= nil
-    end
-    
-    local pattern = word:gsub("([%^$()%.%[%]*+%-?])", "%%%1")
-    
-    if word:match("^[a-zA-Z0-9]+$") then
-        return message:find("%f[%a]" .. pattern .. "%f[%A]") ~= nil
-    else
-        local paddedMsg = " " .. message .. " "
-        
-        local function hasChineseAround(pos)
-            local prevChar = paddedMsg:sub(pos-1, pos-1)
-            local nextChar = paddedMsg:sub(pos + #word, pos + #word)
-            
-            if prevChar and prevChar:match("[\228-\233][\128-\191]+") then
-                return true
-            end
-            if nextChar and nextChar:match("[\228-\233][\128-\191]+") then
-                return true
-            end
-            return false
+    -- burst（4秒内刷屏）
+    local burst=0
+    do
+        local t0 = Window.items[n].t
+        local c=0
+        for i=n,1,-1 do
+            if (t0 - Window.items[i].t) <= 4 then c += 1 else break end
         end
-        
-        local startPos = 1
-        while true do
-            local pos = paddedMsg:find(pattern, startPos)
-            if not pos then break end
-            
-            if not hasChineseAround(pos) then
-                return true
-            end
-            
-            startPos = pos + 1
-        end
-        
-        return false
+        burst=c
     end
+
+    for i=1,n do
+        local a=Window.items[i].meta
+        if a.swear then swearMsgs += 1 end
+        sumPunct += (nz(a.ex,0)*1.2 + nz(a.qu,0)*1.0)
+        sumHash  += nz(a.hash,0)
+        sumEmoji += nz(a.emoji,0)
+        sumRepeat+= nz(a.repeatBurst,0)
+        sumDet   += nz(a.detScore,0)
+    end
+
+    local swearRate = swearMsgs / n
+
+    -- 60%：Detector命中率（更真实）
+    local score = 0
+    score += clamp(swearRate * 120, 0, 60)
+
+    -- 20%：刷屏（mps + burst）
+    local span = math.max(1, Window.items[n].t - Window.items[1].t)
+    local mps = n / span
+    score += clamp((mps/1.8)*12, 0, 12)
+    score += clamp((burst/7)*8, 0, 8)
+
+    -- 20%：情绪（符号/emoji/重复）
+    score += clamp((sumPunct/n)*2.2, 0, 10)
+    score += clamp((sumEmoji/n)*2.0, 0, 5)
+    score += clamp((sumRepeat/n)*3.0, 0, 5)
+
+    -- Detector分值做个微调（避免“全是低级词也爆表”）
+    local avgDet = sumDet / n
+    score += clamp((avgDet/10)*4, 0, 4) -- 最多+4
+
+    return math.floor(clamp(score,0,100))
 end
 
--- ===== 常见误判黑名单 =====
-local falsePositiveList = {
-    ["日"] = {"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", 
-              "日期", "日本", "日志", "日常", "日程", "日历", "日出", "日落", "日光",
-              "日子", "日月", "日夜", "日益", "日均", "日产"},
-    ["草"] = {"草原", "草地", "草坪", "草莓", "花草", "水草", "起草", "草稿", "草案", "草率",
-              "草根", "草木", "草药", "草鞋", "草帽", "草图", "草书", "草绿"},
-    ["靠"] = {"依靠", "可靠", "靠山", "靠近", "靠岸", "靠背", "靠垫", "靠拢", "靠边", "靠得住"},
-    ["妈"] = {"妈妈", "妈咪", "姑妈", "姨妈", "舅妈", "大妈", "阿妈", "妈祖"},
-    ["爷"] = {"爷爷", "老爷", "大爷", "少爷", "爷们", "爷孙", "姥爷", "师爷"},
-    ["爹"] = {"爹爹", "老爹", "干爹", "爹地", "爹娘", "爹妈"},
-    ["SB"] = {"ASB", "BSB", "CSB", "DSB", "ESB", "FSB", "GSB", "HSB", "ISB", "JSB",
-              "KSB", "LSB", "MSB", "NSB", "OSB", "PSB", "QSB", "RSB", "SSB", "TSB",
-              "USB", "VSB", "WSB", "XSB", "YSB", "ZSB"},
+local function getSwearRateWindow()
+    local nowT=os.time()
+    windowPrune(nowT)
+    local n=#Window.items
+    if n==0 then return 0 end
+    local s=0
+    for i=1,n do if Window.items[i].meta.swear then s+=1 end end
+    return math.floor((s/n)*100)
+end
+
+local function getBaZhiLevel(v)
+    if v < 20 then return "🕊️ 和平鸽", Color3.fromRGB(100,255,100) end
+    if v < 40 then return "😐 萌新", Color3.fromRGB(200,255,100) end
+    if v < 60 then return "😤 暴躁老哥", Color3.fromRGB(255,200,100) end
+    if v < 80 then return "🤬 贴吧战神", Color3.fromRGB(255,100,100) end
+    return "💀 狂暴の神", Color3.fromRGB(255,50,50)
+end
+
+-- ===== UI =====
+local UI = {
+    gui=nil, main=nil, titleBar=nil,
+    scroll=nil, listLayout=nil,
+    infoLabel=nil, searchBox=nil,
+
+    panelMenu=nil, panelFilter=nil, panelPeople=nil,
+    bar=nil, handle=nil,
+
+    btnFoldTop=nil,
+    labels={}, pool={},
+    filterText="",
 }
 
--- ===== 判断是否为脏话消息 =====
-local function isSwearMessage(message)
-    local originalMsg = message
-    
-    if originalMsg:find("#") then
-        return true, "hashtag"
+local function uiAlive()
+    return UI.gui and UI.main and UI.main.Parent ~= nil
+end
+
+local function categoryAllowed(cat)
+    if cat=="CHAT" then return CategoryFilter.showCHAT end
+    if not CategoryFilter.showSYSTEM then return false end
+    return CategoryFilter[cat] ~= false
+end
+
+local function shouldShowEntry(entry)
+    if not categoryAllowed(entry.cat) then return false end
+    if UI.filterText=="" then return true end
+    return string.find(string.lower(entry.text), UI.filterText, 1, true) ~= nil
+end
+
+local function getLabel()
+    local lbl = table.remove(UI.pool)
+    if lbl then
+        lbl.Visible=true
+        lbl.Text=""
+        return lbl
     end
-    
-    for _, word in ipairs(swearWordList) do
-        if originalMsg:find(word) then
-            local blacklist = falsePositiveList[word]
-            if blacklist then
-                local inBlacklist = false
-                for _, fp in ipairs(blacklist) do
-                    if originalMsg:find(fp) then
-                        inBlacklist = true
-                        break
-                    end
-                end
-                if inBlacklist then
-                    if isIndependentWord(originalMsg, word) then
-                        return true, word
-                    end
-                else
-                    if isIndependentWord(originalMsg, word) then
-                        return true, word
-                    end
-                end
-            else
-                if isIndependentWord(originalMsg, word) then
-                    return true, word
-                end
-            end
+    lbl = Instance.new("TextLabel")
+    lbl.BackgroundTransparency=1
+    lbl.Size=UDim2.new(1,-10,0,0)
+    lbl.AutomaticSize=Enum.AutomaticSize.Y
+    lbl.TextWrapped=true
+    lbl.RichText=false
+    lbl.TextXAlignment=Enum.TextXAlignment.Left
+    lbl.TextYAlignment=Enum.TextYAlignment.Top
+    lbl.Font=Enum.Font.SourceSans
+    lbl.TextSize=state.fontSize
+    return lbl
+end
+
+local function recycleLabel(lbl)
+    if not lbl then return end
+    lbl.Visible=false
+    lbl.Parent=nil
+    table.insert(UI.pool,lbl)
+end
+
+local function clearRendered()
+    for _,lbl in ipairs(UI.labels) do recycleLabel(lbl) end
+    UI.labels={}
+end
+
+local function renderAll()
+    if not uiAlive() or state.isCollapsed then return end
+    clearRendered()
+
+    local shown=0
+    local start = math.max(1, #state.renderQueue - Config.RenderQueueMax + 1)
+    for i=start, #state.renderQueue do
+        local e=state.renderQueue[i]
+        if e and shouldShowEntry(e) then
+            local lbl=getLabel()
+            lbl.Parent=UI.scroll
+            lbl.Text=e.text
+            lbl.TextSize=state.fontSize
+            lbl.TextColor3=e.color or Config.Colors.Text
+            table.insert(UI.labels,lbl)
+            shown += 1
+            if shown>=Config.MaxRender then break end
         end
     end
-    
-    return false, nil
+
+    task.defer(function()
+        if uiAlive() and UI.scroll then UI.scroll.CanvasPosition=Vector2.new(0,1e9) end
+    end)
 end
 
--- ===== 分析大写字母 =====
-local function analyzeCaps(message)
-    local originalMsg = message
-    local capsCount = 0
-    local consecutiveCount = 0
-    local maxConsecutive = 0
-    local inConsecutive = false
-    
-    for i = 1, #originalMsg do
-        local char = originalMsg:sub(i, i)
-        local byte = char:byte()
-        
-        if byte and byte >= 65 and byte <= 90 then
-            capsCount = capsCount + 1
-            inConsecutive = true
-            consecutiveCount = consecutiveCount + 1
-        else
-            if byte and byte >= 97 and byte <= 122 then
-                if inConsecutive then
-                    if consecutiveCount >= 2 then
-                        BaZhiStats.consecutiveCaps = BaZhiStats.consecutiveCaps + 1
-                    end
-                    maxConsecutive = math.max(maxConsecutive, consecutiveCount)
-                    consecutiveCount = 0
-                    inConsecutive = false
-                end
-            else
-                if inConsecutive then
-                    if consecutiveCount >= 2 then
-                        BaZhiStats.consecutiveCaps = BaZhiStats.consecutiveCaps + 1
-                    end
-                    maxConsecutive = math.max(maxConsecutive, consecutiveCount)
-                    consecutiveCount = 0
-                    inConsecutive = false
-                end
-            end
-        end
+local function appendRender(entry)
+    table.insert(state.renderQueue, entry)
+    if #state.renderQueue > Config.RenderQueueMax then table.remove(state.renderQueue,1) end
+    if not uiAlive() or state.isCollapsed then return end
+
+    if UI.filterText ~= "" or not categoryAllowed(entry.cat) then
+        renderAll()
+        return
     end
-    
-    if inConsecutive and consecutiveCount >= 2 then
-        BaZhiStats.consecutiveCaps = BaZhiStats.consecutiveCaps + 1
-        maxConsecutive = math.max(maxConsecutive, consecutiveCount)
-    end
-    
-    if capsCount > 0 then
-        BaZhiStats.capsMessages = BaZhiStats.capsMessages + 1
-    end
-    
-    return capsCount, maxConsecutive
+
+    local lbl=getLabel()
+    lbl.Parent=UI.scroll
+    lbl.Text=entry.text
+    lbl.TextSize=state.fontSize
+    lbl.TextColor3=entry.color or Config.Colors.Text
+    table.insert(UI.labels,lbl)
+
+    if #UI.labels > Config.MaxRender then recycleLabel(table.remove(UI.labels,1)) end
+
+    task.defer(function()
+        if uiAlive() and UI.scroll then UI.scroll.CanvasPosition=Vector2.new(0,1e9) end
+    end)
 end
 
--- ===== 分析刷屏速度 =====
-local function analyzeBurst()
-    local currentTime = os.time()
-    local timeDiff = currentTime - BaZhiStats.lastMessageTime
-    
-    if timeDiff <= 3 then
-        BaZhiStats.burstCount = BaZhiStats.burstCount + 1
-    else
-        BaZhiStats.burstCount = math.max(0, BaZhiStats.burstCount - 1)
-    end
-    
-    BaZhiStats.lastMessageTime = currentTime
-    table.insert(BaZhiStats.messageTimestamps, currentTime)
-    
-    if #BaZhiStats.messageTimestamps > 20 then
-        table.remove(BaZhiStats.messageTimestamps, 1)
+local function pushHistory(full)
+    table.insert(state.chatHistory, full)
+    if #state.chatHistory > Config.MaxHistory then table.remove(state.chatHistory,1) end
+end
+
+local function addEntry(rawText, cat, colorOverride)
+    local full = ("[%s] %s"):format(nowStr(), rawText)
+    pushHistory(full)
+    local color = colorOverride or (cat=="CHAT" and Config.Colors.Text or Config.Colors.System)
+    appendRender({text=full, cat=cat, color=color})
+end
+
+local function addSystem(text, sysCat)
+    sysCat = sysCat or "SYS_HINT"
+    addEntry("🧠 系统："..text, sysCat, Config.Colors.System)
+end
+
+local function addChat(speaker, msg)
+    local muted = (speaker and state.mutedPlayers[speaker])==true
+    local raw = (speaker==localPlayer.Name) and ("我："..msg) or (speaker.."："..msg)
+
+    addEntry(raw, "CHAT", muted and Config.Colors.Muted or Config.Colors.Text)
+    windowAdd(analyzeChatMessage(raw))
+
+    if speaker and speaker ~= localPlayer.Name then
+        state.messageStats[speaker]=(state.messageStats[speaker] or 0)+1
     end
 end
 
--- ===== 分析消息（修复版，只统计真emoji）=====
-local function analyzeMessage(message)
-    local originalMsg = message
-    
-    -- 分析大写字母
-    local capsCount, maxConsecutive = analyzeCaps(originalMsg)
-    BaZhiStats.capsCount = BaZhiStats.capsCount + capsCount
-    
-    -- 分析重复符号
-    local exclamationCount, questionCount, chineseExclamationCount, chineseQuestionCount = analyzeRepeatedSymbols(originalMsg)
-    BaZhiStats.exclamationCount = BaZhiStats.exclamationCount + exclamationCount
-    BaZhiStats.questionCount = BaZhiStats.questionCount + questionCount
-    BaZhiStats.chineseExclamationCount = BaZhiStats.chineseExclamationCount + chineseExclamationCount
-    BaZhiStats.chineseQuestionCount = BaZhiStats.chineseQuestionCount + chineseQuestionCount
-    
-    -- 分析真正的emoji（修复版）
-    local emojiCount = detectEmoji(originalMsg)
-    BaZhiStats.emojiCount = BaZhiStats.emojiCount + emojiCount
-    
-    -- 统计#号
-    local _, hashtagTotal = string.gsub(originalMsg, "#", "")
-    BaZhiStats.hashtagCount = BaZhiStats.hashtagCount + hashtagTotal
-    
-    -- 判断脏话
-    local isSwear, swearWord = isSwearMessage(originalMsg)
-    if isSwear then
-        BaZhiStats.swearMessages = BaZhiStats.swearMessages + 1
-        if swearWord == "hashtag" then
-            BaZhiStats.hashtagMessages = BaZhiStats.hashtagMessages + 1
-        end
-    end
-    
-    table.insert(BaZhiStats.messageLengths, #originalMsg)
-    if #BaZhiStats.messageLengths > 50 then
-        table.remove(BaZhiStats.messageLengths, 1)
-    end
-    
-    analyzeBurst()
-    
-    BaZhiStats.totalMessages = BaZhiStats.totalMessages + 1
-end
-
--- ===== 计算贴吧狂暴值 =====
-local function calculateBaZhiIndex()
-    if BaZhiStats.totalMessages < 3 then return 0 end
-    
-    local runtime = os.difftime(os.time(), startTime)
-    if runtime < 30 then return 0 end
-    
-    -- 1. 脏话基础分 (0-25分)
-    local swearRate = BaZhiStats.swearMessages / BaZhiStats.totalMessages
-    local swearScore = math.min(25, swearRate * 50)
-    
-    -- 2. 符号暴躁分 (0-30分)
-    local symbolScore = 0
-    if BaZhiStats.totalMessages > 0 then
-        -- 英文符号
-        local avgExclamation = BaZhiStats.exclamationCount / BaZhiStats.totalMessages
-        local avgQuestion = BaZhiStats.questionCount / BaZhiStats.totalMessages
-        
-        -- 中文符号
-        local avgChineseExclamation = BaZhiStats.chineseExclamationCount / BaZhiStats.totalMessages
-        local avgChineseQuestion = BaZhiStats.chineseQuestionCount / BaZhiStats.totalMessages
-        
-        -- #号
-        local avgHashtag = BaZhiStats.hashtagCount / BaZhiStats.totalMessages
-        
-        -- 真正的emoji
-        local avgEmoji = BaZhiStats.emojiCount / BaZhiStats.totalMessages
-        
-        symbolScore = math.min(20, 
-            avgExclamation * 2 +
-            avgQuestion * 1.5 +
-            avgChineseExclamation * 3 +
-            avgChineseQuestion * 2.5 +
-            avgHashtag * 4 +
-            avgEmoji * 5
-        )
-        
-        -- 重复符号加成
-        local repeatBonus = math.min(10, 
-            (BaZhiStats.repeatExclamation + 
-             BaZhiStats.repeatQuestion + 
-             BaZhiStats.repeatChineseExclamation * 2 +
-             BaZhiStats.repeatChineseQuestion * 2) * 1.5
-        )
-        symbolScore = symbolScore + repeatBonus
-    end
-    
-    -- 3. 大写字母分 (0-15分)
-    local capsScore = 0
-    if BaZhiStats.totalMessages > 0 then
-        local capsRate = BaZhiStats.capsCount / (BaZhiStats.totalMessages * 10)
-        capsScore = math.min(8, capsRate * 25)
-        
-        local consecutiveBonus = math.min(7, BaZhiStats.consecutiveCaps * 1.5)
-        capsScore = capsScore + consecutiveBonus
-    end
-    
-    -- 4. 刷屏速度分 (0-15分)
-    local speedScore = 0
-    if runtime > 0 then
-        local msgPerMin = (BaZhiStats.totalMessages / runtime) * 60
-        speedScore = math.min(10, msgPerMin * 1.5)
-        
-        local burstBonus = math.min(5, BaZhiStats.burstCount)
-        speedScore = speedScore + burstBonus
-    end
-    
-    -- 5. 消息长度分 (0-15分)
-    local lengthScore = 0
-    if #BaZhiStats.messageLengths > 0 then
-        local totalLength = 0
-        for _, len in ipairs(BaZhiStats.messageLengths) do
-            totalLength = totalLength + len
-        end
-        local avgLength = totalLength / #BaZhiStats.messageLengths
-        lengthScore = math.min(15, avgLength / 5)
-    end
-    
-    local total = swearScore + symbolScore + capsScore + speedScore + lengthScore
-    return math.floor(math.min(100, total))
-end
-
--- ===== 获取暴躁等级 =====
-local function getBaZhiLevel(baZhi)
-    if baZhi < 20 then
-        return "🕊️ 和平鸽", Color3.fromRGB(100, 255, 100)
-    elseif baZhi < 40 then
-        return "😐 萌新", Color3.fromRGB(200, 255, 100)
-    elseif baZhi < 60 then
-        return "😤 暴躁老哥", Color3.fromRGB(255, 200, 100)
-    elseif baZhi < 80 then
-        return "🤬 贴吧战神", Color3.fromRGB(255, 100, 100)
-    else
-        return "💀 狂暴の神", Color3.fromRGB(255, 50, 50)
+-- ===== Save/Export/Copy =====
+local function writeAllPossible(paths, content)
+    for _,p in ipairs(paths) do
+        pcall(function() if writefile then writefile(p, content) end end)
     end
 end
 
--- ===== 获取脏话率 =====
-local function getSwearRate()
-    if BaZhiStats.totalMessages == 0 then return 0 end
-    return math.floor((BaZhiStats.swearMessages / BaZhiStats.totalMessages) * 100)
+local function buildSaveContent()
+    local bz=computeBaZhi()
+    local lvl=select(1,getBaZhiLevel(bz))
+    local content=""
+    content ..="╔══════════════════════════════════════════════════════════════╗\n"
+    content ..="║ 贴吧狂暴聊天记录 "..nowStr().."\n"
+    content ..="║ 版本："..Config.Version.."\n"
+    content ..="║ 玩家："..localPlayer.Name.."\n"
+    content ..="║ 总记录："..tostring(#state.chatHistory).." 条\n"
+    content ..=("║ Detector：%s | 字库词数：%d\n"):format(det and "ON" or "OFF", totalWordCount)
+    content ..="║ 近窗狂暴值："..tostring(bz).."%，等级："..lvl.."\n"
+    content ..="╚══════════════════════════════════════════════════════════════╝\n\n"
+    for i=1,#state.chatHistory do content ..= state.chatHistory[i].."\n" end
+    return content
 end
 
--- ===== 保存文件 =====
-local function saveToFileAsync(callback)
-    if isSaving then
-        if callback then callback(false, "正在保存中") end
-        return false
-    end
-    
-    isSaving = true
-    
+local function saveToFileAsync(cb)
+    if state.isSaving then if cb then cb(false,"正在保存中") end return end
+    state.isSaving=true
     task.spawn(function()
-        local success = false
-        local errorMsg = "未知错误"
-        
-        local timeout = false
+        local ok=false
+        local err="未知错误"
+        local timeout=false
+
         task.spawn(function()
             task.wait(Config.SaveTimeout)
-            timeout = true
+            timeout=true
         end)
-        
-        local saveSuccess, saveError = pcall(function()
-            local baZhi = calculateBaZhiIndex()
-            local level, levelColor = getBaZhiLevel(baZhi)
-            
-            local content = "╔══════════════════════════════════════════════════════════════╗\n"
-            content = content .. "║ 贴吧狂暴聊天记录 " .. getTime() .. "                     ║\n"
-            content = content .. "║ 玩家：" .. localPlayer.Name .. "\n"
-            content = content .. "║ 共 " .. #chatHistory .. " 条消息\n"
-            content = content .. "║ 运行时间：" .. os.difftime(os.time(), startTime) .. "秒\n"
-            content = content .. "║ 贴吧狂暴值：" .. baZhi .. "%\n"
-            content = content .. "║ 暴躁等级：" .. level .. "\n"
-            content = content .. "║ 脏话消息：" .. BaZhiStats.swearMessages .. "条\n"
-            content = content .. "║ 脏话率：" .. getSwearRate() .. "%\n"
-            content = content .. "║ 英文感叹号：" .. BaZhiStats.exclamationCount .. "个\n"
-            content = content .. "║ 中文感叹号：" .. BaZhiStats.chineseExclamationCount .. "个\n"
-            content = content .. "║ 英文问号：" .. BaZhiStats.questionCount .. "个\n"
-            content = content .. "║ 中文问号：" .. BaZhiStats.chineseQuestionCount .. "个\n"
-            content = content .. "║ 真·emoji：" .. BaZhiStats.emojiCount .. "个\n"
-            content = content .. "║ #号总数：" .. BaZhiStats.hashtagCount .. "个\n"
-            content = content .. "║ 大写字母：" .. BaZhiStats.capsCount .. "个\n"
-            content = content .. "║ 连续大写：" .. BaZhiStats.consecutiveCaps .. "次\n"
-            content = content .. "║ 刷屏次数：" .. BaZhiStats.burstCount .. "次\n"
-            content = content .. "║ 字库词数：" .. #swearWordList .. "个\n"
-            content = content .. "╚══════════════════════════════════════════════════════════════╝\n\n"
-            
-            for i = 1, #chatHistory do
-                content = content .. chatHistory[i] .. "\n"
-            end
-            
+
+        local ok2, e2 = pcall(function()
+            local content=buildSaveContent()
             local paths = {
                 Config.FileName,
-                "/storage/emulated/0/" .. Config.FileName,
-                "./" .. Config.FileName,
-                "聊天记录_" .. os.date("%Y%m%d_%H%M%S") .. ".txt",
+                "./"..Config.FileName,
+                "聊天记录_"..os.date("%Y%m%d_%H%M%S")..".txt",
+                "/storage/emulated/0/"..Config.FileName,
             }
-            
-            for _, path in ipairs(paths) do
-                pcall(function() writefile(path, content) end)
-            end
+            writeAllPossible(paths, content)
         end)
-        
-        if timeout then
-            errorMsg = "保存超时"
-        elseif saveSuccess then
-            success = true
-        else
-            errorMsg = tostring(saveError)
-        end
-        
-        isSaving = false
-        if callback then callback(success, errorMsg) end
-    end)()
-    
-    return true
+
+        if timeout then ok=false; err="保存超时"
+        elseif ok2 then ok=true
+        else ok=false; err=tostring(e2) end
+
+        state.isSaving=false
+        if cb then cb(ok,err) end
+    end)
 end
 
--- ===== 保存文件 =====
-local function saveToFile()
-    return saveToFileAsync()
-end
+-- ===== UI build =====
+local function setPinnedPosition()
+    if not uiAlive() then return end
+    local pad=10
+    local w=state.width
+    local h=state.isCollapsed and Config.CollapsedHeight or state.height
 
--- ===== 自动换行文本 =====
-local function createWrappedText(parent, text, textColor, fontSize)
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, -10, 0, 0)
-    label.BackgroundTransparency = 1
-    label.Text = text
-    label.TextColor3 = textColor
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.TextYAlignment = Enum.TextYAlignment.Top
-    label.TextSize = fontSize
-    label.Font = Enum.Font.SourceSans
-    label.RichText = true
-    label.TextWrapped = true
-    label.AutomaticSize = Enum.AutomaticSize.Y
-    label.Parent = parent
-    return label
-end
-
--- ===== 刷新聊天显示 =====
-local function refreshChatDisplay(scrollFrame)
-    if not scrollFrame then return end
-    
-    scrollFrame:ClearAllChildren()
-    
-    local yPos = 0
-    for i = 1, #chatHistory do
-        local msg = chatHistory[i]
-        local isSystem = msg:find("系统：") ~= nil
-        
-        local label = createWrappedText(scrollFrame, msg, 
-            isSystem and Config.Colors.System or Config.Colors.Text, 
-            currentFontSize)
-        
-        label.Position = UDim2.new(0, 5, 0, yPos)
-        yPos = yPos + label.AbsoluteSize.Y + 2
-    end
-    
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, yPos)
-    
-    if yPos > 0 then
-        scrollFrame.CanvasPosition = Vector2.new(0, yPos)
-    end
-end
-
--- ===== 切换折叠状态 =====
-local function toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, resizeHandle, collapseIcon)
-    isCollapsed = not isCollapsed
-    
-    if isCollapsed then
-        mainFrame.Size = UDim2.new(0, currentWidth, 0, Config.CollapsedHeight)
-        scrollFrame.Visible = false
-        buttonGrid.Visible = false
-        resizeHandle.Visible = false
-        collapseIcon.Text = "▲"
-        
-        countLabel.Size = UDim2.new(0, 380, 0, 20)
-        countLabel.Position = UDim2.new(0, 100, 0, 15)
-        countLabel.TextXAlignment = Enum.TextXAlignment.Left
+    if state.pinned=="BR" then
+        UI.main.Position = UDim2.new(1,-w-pad,1,-h-pad)
+    elseif state.pinned=="TR" then
+        UI.main.Position = UDim2.new(1,-w-pad,0,pad)
+    elseif state.pinned=="BL" then
+        UI.main.Position = UDim2.new(0,pad,1,-h-pad)
     else
-        mainFrame.Size = UDim2.new(0, currentWidth, 0, currentHeight)
-        scrollFrame.Visible = true
-        buttonGrid.Visible = true
-        resizeHandle.Visible = true
-        collapseIcon.Text = "▼"
-        
-        countLabel.Size = UDim2.new(1, -20, 0, 20)
-        countLabel.Position = UDim2.new(0, 10, 1, -25)
-        countLabel.TextXAlignment = Enum.TextXAlignment.Left
-        
-        refreshChatDisplay(scrollFrame)
+        UI.main.Position = UDim2.new(0,pad,0,pad)
     end
-    
-    updateUIDisplay(mainFrame, countLabel)
-    pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
 end
 
--- ===== 更新UI显示 =====
-local function updateUIDisplay(mainFrame, countLabel)
-    if not countLabel then return end
-    
-    local baZhi = calculateBaZhiIndex()
-    local level = getBaZhiLevel(baZhi)
-    
-    if isCollapsed then
-        local swearRate = getSwearRate()
-        countLabel.Text = string.format("%s 💀 %d%% | 🤬 %d%% | 😂 %d个 | 📚 %d词", 
-            level, baZhi, swearRate, BaZhiStats.emojiCount, #swearWordList)
+local function createCapsule(parent, x, y, w, text)
+    local b=Instance.new("TextButton")
+    b.Size=UDim2.new(0,w,0,26)
+    b.Position=UDim2.new(0,x,0,y)
+    b.BackgroundColor3=Color3.fromRGB(0,0,0)
+    b.BackgroundTransparency=0.55
+    b.BorderSizePixel=0
+    b.Text=text
+    b.TextColor3=Color3.new(1,1,1)
+    b.TextSize=13
+    b.Font=Enum.Font.GothamBold
+    b.Parent=parent
+    local cr=Instance.new("UICorner"); cr.CornerRadius=UDim.new(0,999); cr.Parent=b
+    local st=Instance.new("UIStroke"); st.Thickness=1; st.Transparency=0.6; st.Color=Config.Colors.Secondary; st.Parent=b
+    return b, st
+end
+
+local function setCapsule(btn, stroke, on, color)
+    if on then
+        btn.BackgroundTransparency=0.25
+        stroke.Transparency=0.2
+        stroke.Color=color
     else
-        countLabel.Text = string.format("📊 %d条 | 👥 %d人 | %s 💀 %d%% | 🤬 %d%% | 😂 %d个 | 📚 %d词 | 🔠 %d个", 
-            messageCount, 
-            #Players:GetPlayers(),
-            level,
-            baZhi,
-            getSwearRate(),
-            BaZhiStats.emojiCount,
-            #swearWordList,
-            BaZhiStats.capsCount)
+        btn.BackgroundTransparency=0.7
+        stroke.Transparency=0.8
+        stroke.Color=Config.Colors.Dim
     end
 end
 
--- ===== 添加消息 =====
-local function addMessage(text, isSystem)
-    local fullMsg = "[" .. getTime() .. "] " .. text
-    table.insert(chatHistory, fullMsg)
-    
-    if not isSystem then
-        analyzeMessage(text)
-        
-        local speaker = string.match(text, "^(.-)：")
-        if speaker and speaker ~= "系统" and speaker ~= "我" then
-            for _, player in ipairs(Players:GetPlayers()) do
-                if player.Name == speaker and player ~= localPlayer then
-                    messageStats[speaker] = (messageStats[speaker] or 0) + 1
-                    break
-                end
-            end
-        end
-        messageCount = messageCount + 1
+local function rebuildPeopleList(listFrame)
+    if not uiAlive() then return end
+    listFrame:ClearAllChildren()
+
+    local layout=Instance.new("UIListLayout")
+    layout.Padding=UDim.new(0,6)
+    layout.SortOrder=Enum.SortOrder.LayoutOrder
+    layout.Parent=listFrame
+
+    local function addPerson(name)
+        local muted = state.mutedPlayers[name]==true
+        local b=Instance.new("TextButton")
+        b.Size=UDim2.new(1,-10,0,28)
+        b.BackgroundTransparency=0.15
+        b.BackgroundColor3 = muted and Config.Colors.Danger or Config.Colors.Secondary
+        b.TextColor3 = Color3.new(0,0,0)
+        b.TextSize=14
+        b.Font=Enum.Font.GothamBold
+        b.Text=(muted and "🔇 " or "🔊 ")..name
+        b.BorderSizePixel=0
+        b.Parent=listFrame
+        b.MouseButton1Click:Connect(function()
+            state.mutedPlayers[name]=not state.mutedPlayers[name]
+            addSystem("已切换静音 -> "..name, "SYS_HINT")
+            rebuildPeopleList(listFrame)
+            renderAll()
+        end)
     end
-    
-    if #chatHistory > Config.MaxMessages then
-        table.remove(chatHistory, 1)
-    end
-    
-    local gui = playerGui:FindFirstChild("ChatLoggerGUI")
-    if gui then
-        local mainFrame = gui:FindFirstChild("MainFrame")
-        if not mainFrame then return end
-        
-        local scrollFrame = mainFrame:FindFirstChild("ScrollingFrame")
-        local countLabel = mainFrame:FindFirstChild("CountLabel")
-        
-        if scrollFrame and not isCollapsed then
-            local label = createWrappedText(scrollFrame, fullMsg, 
-                isSystem and Config.Colors.System or Config.Colors.Text, 
-                currentFontSize)
-            
-            local yPos = 0
-            for i, child in ipairs(scrollFrame:GetChildren()) do
-                if child:IsA("TextLabel") then
-                    child.Position = UDim2.new(0, 5, 0, yPos)
-                    yPos = yPos + child.AbsoluteSize.Y + 2
-                end
-            end
-            
-            scrollFrame.CanvasSize = UDim2.new(0, 0, 0, yPos)
-            
-            if yPos > 0 then
-                scrollFrame.CanvasPosition = Vector2.new(0, yPos)
-            end
-        end
-        
-        if countLabel then
-            updateUIDisplay(mainFrame, countLabel)
-        end
-    end
-    
-    if not isSystem and Config.Vibrate then
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
+
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p~=localPlayer then addPerson(p.Name) end
     end
 end
 
--- ===== 显示详细统计 =====
-local function showDetailedStats()
-    local runtime = os.difftime(os.time(), startTime)
-    local baZhi = calculateBaZhiIndex()
-    local level = getBaZhiLevel(baZhi)
-    local swearRate = getSwearRate()
-    
-    addMessage("📊 系统：═════ 实时统计 ═════", true)
-    addMessage("📊 系统：总消息数：" .. BaZhiStats.totalMessages .. "条", true)
-    addMessage("📊 系统：在线人数：" .. #Players:GetPlayers() .. "人", true)
-    addMessage("📊 系统：运行时间：" .. math.floor(runtime/60) .. "分钟", true)
-    addMessage("📊 系统：消息频率：" .. (runtime>0 and math.floor((BaZhiStats.totalMessages/runtime)*60) or 0) .. "条/分钟", true)
-    addMessage("📊 系统：字库词数：" .. #swearWordList .. "个", true)
-    
-    addMessage("📊 系统：════ 暴躁分析 ════", true)
-    addMessage("📊 系统：💢 英文感叹号：" .. BaZhiStats.exclamationCount .. "个", true)
-    addMessage("📊 系统：❗ 中文感叹号：" .. BaZhiStats.chineseExclamationCount .. "个", true)
-    addMessage("📊 系统：❓ 英文问号：" .. BaZhiStats.questionCount .. "个", true)
-    addMessage("📊 系统：？ 中文问号：" .. BaZhiStats.chineseQuestionCount .. "个", true)
-    addMessage("📊 系统：😂 真·emoji：" .. BaZhiStats.emojiCount .. "个", true)
-    addMessage("📊 系统：🔊 大写字母：" .. BaZhiStats.capsCount .. "个", true)
-    addMessage("📊 系统：📏 连续大写：" .. BaZhiStats.consecutiveCaps .. "次", true)
-    addMessage("📊 系统：🔁 重复符号：" .. (BaZhiStats.repeatExclamation + BaZhiStats.repeatQuestion + BaZhiStats.repeatChineseExclamation + BaZhiStats.repeatChineseQuestion) .. "次", true)
-    addMessage("📊 系统：#️⃣ #号总数：" .. BaZhiStats.hashtagCount .. "个", true)
-    addMessage("📊 系统：📌 带#号消息：" .. BaZhiStats.hashtagMessages .. "条", true)
-    addMessage("📊 系统：🤬 脏话消息：" .. BaZhiStats.swearMessages .. "条", true)
-    addMessage("📊 系统：📈 脏话率：" .. swearRate .. "%", true)
-    addMessage("📊 系统：⚡ 刷屏次数：" .. BaZhiStats.burstCount .. "次", true)
-    
-    if BaZhiStats.totalMessages > 0 then
-        addMessage("📊 系统：════ 平均指标 ════", true)
-        addMessage("📊 系统：平均感叹号：" .. string.format("%.1f", (BaZhiStats.exclamationCount + BaZhiStats.chineseExclamationCount)/BaZhiStats.totalMessages) .. "个/条", true)
-        addMessage("📊 系统：平均问号：" .. string.format("%.1f", (BaZhiStats.questionCount + BaZhiStats.chineseQuestionCount)/BaZhiStats.totalMessages) .. "个/条", true)
-        addMessage("📊 系统：平均emoji：" .. string.format("%.1f", BaZhiStats.emojiCount/BaZhiStats.totalMessages) .. "个/条", true)
-        addMessage("📊 系统：平均#号：" .. string.format("%.1f", BaZhiStats.hashtagCount/BaZhiStats.totalMessages) .. "个/条", true)
-        addMessage("📊 系统：平均大写：" .. string.format("%.1f", BaZhiStats.capsCount/BaZhiStats.totalMessages) .. "个/条", true)
+local function buildInfoText()
+    local parts={}
+    table.insert(parts, ("👥%d"):format(#Players:GetPlayers()))
+    local bz=computeBaZhi()
+    local lvl,c=getBaZhiLevel(bz)
+    table.insert(parts, ("%s %d%%"):format(lvl,bz))
+    if Features.showSwearRate then table.insert(parts, ("🤬%d%%"):format(getSwearRateWindow())) end
+    if Features.showWordCount then table.insert(parts, ("📚%d"):format(totalWordCount)) end
+    table.insert(parts, ("Detector:%s"):format(det and "ON" or "OFF"))
+    if Features.showRuntime then
+        local rt=os.difftime(os.time(), state.startTime)
+        table.insert(parts, ("⏱️%dm"):format(math.floor(rt/60)))
     end
-    
-    addMessage("📊 系统：════ 玩家统计 ════", true)
-    local sortedStats = {}
-    for name, count in pairs(messageStats) do
-        table.insert(sortedStats, {name = name, count = count})
-    end
-    table.sort(sortedStats, function(a, b) return a.count > b.count end)
-    
-    for i, data in ipairs(sortedStats) do
-        local percentage = BaZhiStats.totalMessages>0 and math.floor((data.count/BaZhiStats.totalMessages)*100) or 0
-        addMessage(string.format("📊 系统：%d. %s：%d条 (%d%%)", i, data.name, data.count, percentage), true)
-    end
-    
-    addMessage("📊 系统：════ 暴躁指数 ════", true)
-    addMessage("📊 系统：💀 贴吧狂暴值：" .. baZhi .. "%", true)
-    
-    local bar = ""
-    for i = 1, 20 do
-        bar = bar .. (i <= math.floor(baZhi/5) and "█" or "░")
-    end
-    addMessage("📊 系统：" .. bar, true)
-    
-    addMessage("📊 系统：等级：" .. level, true)
+    return table.concat(parts," | "), c
 end
 
--- ===== 创建UI（完整版）=====
+local function updateInfo()
+    if not uiAlive() or not UI.infoLabel then return end
+    local ok, t, c = pcall(function()
+        local text, col = buildInfoText()
+        return text, col
+    end)
+    if not ok then
+        UI.infoLabel.Text="⚠️ info crash（已兜底）"
+        UI.infoLabel.TextColor3=Config.Colors.Danger
+        return
+    end
+    UI.infoLabel.Text=t
+    UI.infoLabel.TextColor3=c or Config.Colors.Secondary
+end
+
+local function applyCollapsedUI()
+    if not uiAlive() then return end
+    UI.panelMenu.Visible=false
+    UI.panelFilter.Visible=false
+    if UI.panelPeople then UI.panelPeople.Visible=false end
+
+    if state.isCollapsed then
+        tween(UI.main, 0.22, {Size=UDim2.new(0,state.width,0,Config.CollapsedHeight)})
+        UI.scroll.Visible=false
+        UI.bar.Visible=false
+        UI.handle.Visible=false
+        UI.btnFoldTop.Text="▲"
+    else
+        tween(UI.main, 0.22, {Size=UDim2.new(0,state.width,0,state.height)})
+        UI.scroll.Visible=true
+        UI.bar.Visible=true
+        UI.handle.Visible=true
+        UI.btnFoldTop.Text="▼"
+        renderAll()
+    end
+    setPinnedPosition()
+end
+
 local function createUI()
     local old = playerGui:FindFirstChild("ChatLoggerGUI")
     if old then old:Destroy() end
-    
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "ChatLoggerGUI"
-    gui.ResetOnSpawn = false
-    gui.Parent = playerGui
-    
-    -- 主框架
-    local mainFrame = Instance.new("Frame")
-    mainFrame.Name = "MainFrame"
-    mainFrame.Size = UDim2.new(0, currentWidth, 0, currentHeight)
-    mainFrame.Position = UDim2.new(1, -currentWidth - 10, 1, -currentHeight - 10)
-    mainFrame.BackgroundColor3 = Config.Colors.Background
-    mainFrame.BackgroundTransparency = 0.1
-    mainFrame.BorderSizePixel = 0
-    mainFrame.ClipsDescendants = true
-    mainFrame.Active = true
-    mainFrame.Parent = gui
-    
-    -- 毛玻璃
-    local glassEffect = Instance.new("Frame")
-    glassEffect.Size = UDim2.new(1, 0, 1, 0)
-    glassEffect.BackgroundColor3 = Color3.new(1, 1, 1)
-    glassEffect.BackgroundTransparency = 0.95
-    glassEffect.BorderSizePixel = 0
-    glassEffect.Parent = mainFrame
-    
-    -- 霓虹边框
-    local border = Instance.new("Frame")
-    border.Size = UDim2.new(1, 0, 1, 0)
-    border.BackgroundTransparency = 1
-    border.BorderSizePixel = 3
-    border.BorderColor3 = Config.Colors.Primary
-    border.Parent = mainFrame
-    
-    -- 动态光晕
-    local glow = Instance.new("Frame")
-    glow.Size = UDim2.new(1, 10, 1, 10)
-    glow.Position = UDim2.new(0, -5, 0, -5)
-    glow.BackgroundColor3 = Config.Colors.Primary
-    glow.BackgroundTransparency = 0.9
-    glow.BorderSizePixel = 0
-    glow.Parent = mainFrame
-    
-    -- 标题栏
-    local titleBar = Instance.new("Frame")
-    titleBar.Name = "TitleBar"
-    titleBar.Size = UDim2.new(1, 0, 0, 50)
-    titleBar.BackgroundColor3 = Config.Colors.Primary
-    titleBar.BackgroundTransparency = 0.2
-    titleBar.BorderSizePixel = 0
-    titleBar.Parent = mainFrame
-    
-    -- 标题文字
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -130, 1, 0)
-    title.Position = UDim2.new(0, 15, 0, 0)
-    title.BackgroundTransparency = 1
-    title.Text = "💀 贴吧狂暴记录器 v14.5 💀"
-    title.TextColor3 = Color3.new(1, 1, 1)
-    title.TextSize = currentFontSize + 4
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Font = Enum.Font.GothamBold
-    title.Parent = titleBar
-    
-    -- 隐藏按钮
-    local hideButton = Instance.new("TextButton")
-    hideButton.Size = UDim2.new(0, 40, 0, 40)
-    hideButton.Position = UDim2.new(1, -45, 0, 5)
-    hideButton.BackgroundColor3 = Config.Colors.Accent
-    hideButton.BackgroundTransparency = 0.3
-    hideButton.Text = "✖"
-    hideButton.TextColor3 = Color3.new(0, 0, 0)
-    hideButton.TextSize = currentFontSize + 8
-    hideButton.Font = Enum.Font.GothamBold
-    hideButton.Parent = titleBar
-    
-    -- 折叠指示器
-    local collapseIcon = Instance.new("TextLabel")
-    collapseIcon.Size = UDim2.new(0, 30, 0, 30)
-    collapseIcon.Position = UDim2.new(1, -80, 0, 10)
-    collapseIcon.BackgroundTransparency = 1
-    collapseIcon.Text = "▼"
-    collapseIcon.TextColor3 = Color3.new(1, 1, 1)
-    collapseIcon.TextSize = currentFontSize + 2
-    collapseIcon.Font = Enum.Font.GothamBold
-    collapseIcon.Parent = titleBar
-    
-    -- 聊天区域
-    local scrollFrame = Instance.new("ScrollingFrame")
-    scrollFrame.Name = "ScrollingFrame"
-    scrollFrame.Size = UDim2.new(1, -20, 1, -140)
-    scrollFrame.Position = UDim2.new(0, 10, 0, 60)
-    scrollFrame.BackgroundColor3 = Color3.new(0, 0, 0)
-    scrollFrame.BackgroundTransparency = 0.5
-    scrollFrame.BorderSizePixel = 0
-    scrollFrame.ScrollBarThickness = 8
-    scrollFrame.ScrollBarImageColor3 = Config.Colors.Secondary
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
-    scrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    scrollFrame.Parent = mainFrame
-    
-    -- 按钮区域
-    local buttonGrid = Instance.new("Frame")
-    buttonGrid.Size = UDim2.new(1, -20, 0, 80)
-    buttonGrid.Position = UDim2.new(0, 10, 1, -90)
-    buttonGrid.BackgroundTransparency = 1
-    buttonGrid.Parent = mainFrame
-    
-    -- 创建按钮函数
-    local function createButton(x, y, color, text, width)
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, width or 70, 0, 35)
-        btn.Position = UDim2.new(0, x, 0, y)
-        btn.BackgroundColor3 = color
-        btn.BackgroundTransparency = 0.2
-        btn.Text = text
-        btn.TextColor3 = Color3.new(1, 1, 1)
-        btn.TextSize = currentFontSize - 2
-        btn.Font = Enum.Font.GothamBold
-        btn.Parent = buttonGrid
-        
-        btn.MouseEnter:Connect(function()
-            TweenService:Create(btn, TweenInfo.new(0.2), {BackgroundTransparency = 0}):Play()
-            btn.TextSize = currentFontSize
-        end)
-        
-        btn.MouseLeave:Connect(function()
-            TweenService:Create(btn, TweenInfo.new(0.2), {BackgroundTransparency = 0.2}):Play()
-            btn.TextSize = currentFontSize - 2
-        end)
-        
-        return btn
+
+    UI = {labels={}, pool={}, filterText=""}
+
+    local gui=Instance.new("ScreenGui")
+    gui.Name="ChatLoggerGUI"
+    gui.ResetOnSpawn=false
+    gui.Parent=playerGui
+    UI.gui=gui
+
+    local main=Instance.new("Frame")
+    main.Size=UDim2.new(0,state.width,0,state.height)
+    main.BackgroundColor3=Config.Colors.Background
+    main.BackgroundTransparency=0.08
+    main.BorderSizePixel=0
+    main.ClipsDescendants=true
+    main.Active=true
+    main.Parent=gui
+    UI.main=main
+
+    local stroke=Instance.new("UIStroke")
+    stroke.Thickness=2
+    stroke.Color=Config.Colors.Primary
+    stroke.Transparency=0.15
+    stroke.Parent=main
+
+    local titleBar=Instance.new("Frame")
+    titleBar.Size=UDim2.new(1,0,0,86)
+    titleBar.BackgroundColor3=Config.Colors.Primary
+    titleBar.BackgroundTransparency=0.22
+    titleBar.BorderSizePixel=0
+    titleBar.Parent=main
+    UI.titleBar=titleBar
+
+    local title=Instance.new("TextLabel")
+    title.BackgroundTransparency=1
+    title.Size=UDim2.new(1,-330,0,40)
+    title.Position=UDim2.new(0,14,0,0)
+    title.TextXAlignment=Enum.TextXAlignment.Left
+    title.Font=Enum.Font.GothamBold
+    title.TextSize=state.fontSize+3
+    title.TextColor3=Color3.new(1,1,1)
+    title.Text="💀 贴吧狂暴记录器 "..Config.Version
+    title.Parent=titleBar
+
+    local search=Instance.new("TextBox")
+    search.Size=UDim2.new(0,190,0,28)
+    search.Position=UDim2.new(1,-308,0,6)
+    search.BackgroundColor3=Color3.fromRGB(0,0,0)
+    search.BackgroundTransparency=0.35
+    search.TextColor3=Color3.new(1,1,1)
+    search.PlaceholderText="🔎 搜索过滤..."
+    search.PlaceholderColor3=Color3.fromRGB(200,200,200)
+    search.Text=""
+    search.ClearTextOnFocus=false
+    search.Font=Enum.Font.SourceSans
+    search.TextSize=14
+    search.BorderSizePixel=0
+    search.Parent=titleBar
+    UI.searchBox=search
+
+    local function mkTopBtn(x, text, bg, tc)
+        local b=Instance.new("TextButton")
+        b.Size=UDim2.new(0,40,0,40)
+        b.Position=UDim2.new(1,x,0,0)
+        b.BackgroundColor3=bg
+        b.BackgroundTransparency=0.2
+        b.BorderSizePixel=0
+        b.Text=text
+        b.TextSize=20
+        b.Font=Enum.Font.GothamBold
+        b.TextColor3=tc or Color3.new(0,0,0)
+        b.Parent=titleBar
+        return b
     end
-    
-    -- 第一排
-    local saveBtn = createButton(0, 0, Color3.fromRGB(0, 200, 0), "💾保存")
-    local clearBtn = createButton(80, 0, Color3.fromRGB(255, 100, 0), "🗑️清空")
-    local exportBtn = createButton(160, 0, Color3.fromRGB(0, 150, 255), "📤导出")
-    local statsBtn = createButton(240, 0, Color3.fromRGB(150, 0, 255), "📊统计")
-    
-    -- 第二排
-    local fontBtn = createButton(0, 40, Color3.fromRGB(100, 100, 100), "🔤字体", 60)
-    local copyBtn = createButton(70, 40, Color3.fromRGB(100, 100, 100), "📋复制", 60)
-    local themeBtn = createButton(140, 40, Color3.fromRGB(200, 0, 200), "🎨主题", 60)
-    local resizeBtn = createButton(210, 40, Color3.fromRGB(0, 200, 200), "📏大小", 60)
-    local closeBtn = createButton(280, 40, Color3.fromRGB(255, 0, 0), "⏻关闭", 60)
-    
-    -- 右下角调整手柄
-    local resizeHandle = Instance.new("Frame")
-    resizeHandle.Name = "ResizeHandle"
-    resizeHandle.Size = UDim2.new(0, resizeHandleSize, 0, resizeHandleSize)
-    resizeHandle.Position = UDim2.new(1, -resizeHandleSize, 1, -resizeHandleSize)
-    resizeHandle.BackgroundColor3 = Config.Colors.Secondary
-    resizeHandle.BackgroundTransparency = 0.5
-    resizeHandle.BorderSizePixel = 0
-    resizeHandle.Parent = mainFrame
-    
-    -- 信息标签
-    local countLabel = Instance.new("TextLabel")
-    countLabel.Name = "CountLabel"
-    countLabel.Size = UDim2.new(1, -20, 0, 20)
-    countLabel.Position = UDim2.new(0, 10, 1, -25)
-    countLabel.BackgroundTransparency = 1
-    countLabel.Text = string.format("📊 0条 | 👥 0人 | 💀 0%% | 🤬 0%% | 😂 0个 | 📚 %d词 | 🔠 0个", #swearWordList)
-    countLabel.TextColor3 = Config.Colors.Secondary
-    countLabel.TextSize = currentFontSize - 4
-    countLabel.TextXAlignment = Enum.TextXAlignment.Left
-    countLabel.Font = Enum.Font.SourceSansBold
-    countLabel.Parent = mainFrame
-    
-    -- ===== 拖拽功能 =====
+
+    local btnMenu   = mkTopBtn(-60,  "⚙️", Config.Colors.Secondary)
+    local btnFilter = mkTopBtn(-110, "🧩", Config.Colors.Accent)
+    local btnHide   = mkTopBtn(-160, "✖",  Color3.fromRGB(255,255,255), Color3.new(0,0,0))
+    local btnFoldTop= mkTopBtn(-210, "▼",  Color3.fromRGB(255,255,255), Color3.new(0,0,0))
+    UI.btnFoldTop=btnFoldTop
+
+    local chipRow=Instance.new("Frame")
+    chipRow.Size=UDim2.new(1,-20,0,34)
+    chipRow.Position=UDim2.new(0,10,0,46)
+    chipRow.BackgroundTransparency=1
+    chipRow.Parent=titleBar
+
+    local chipChat, stChat = createCapsule(chipRow, 0, 4, 90, "💬 聊天")
+    local chipSys,  stSys  = createCapsule(chipRow, 98,4, 90, "🧠 系统")
+    local function refreshChips()
+        setCapsule(chipChat, stChat, CategoryFilter.showCHAT, Config.Colors.Secondary)
+        setCapsule(chipSys,  stSys,  CategoryFilter.showSYSTEM, Config.Colors.Accent)
+    end
+    refreshChips()
+
+    chipChat.MouseButton1Click:Connect(function()
+        CategoryFilter.showCHAT = not CategoryFilter.showCHAT
+        refreshChips(); renderAll()
+    end)
+    chipSys.MouseButton1Click:Connect(function()
+        CategoryFilter.showSYSTEM = not CategoryFilter.showSYSTEM
+        refreshChips(); renderAll()
+    end)
+
+    local scroll=Instance.new("ScrollingFrame")
+    scroll.Size=UDim2.new(1,-20,1,-210)
+    scroll.Position=UDim2.new(0,10,0,94)
+    scroll.BackgroundColor3=Color3.new(0,0,0)
+    scroll.BackgroundTransparency=0.45
+    scroll.BorderSizePixel=0
+    scroll.ScrollBarThickness=8
+    scroll.ScrollBarImageColor3=Config.Colors.Secondary
+    scroll.Parent=main
+    UI.scroll=scroll
+
+    local layout=Instance.new("UIListLayout")
+    layout.Padding=UDim.new(0,4)
+    layout.SortOrder=Enum.SortOrder.LayoutOrder
+    layout.Parent=scroll
+    UI.listLayout=layout
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        if uiAlive() then scroll.CanvasSize=UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+10) end
+    end)
+
+    local bar=Instance.new("Frame")
+    bar.Size=UDim2.new(1,-20,0,96)
+    bar.Position=UDim2.new(0,10,1,-132)
+    bar.BackgroundTransparency=1
+    bar.Parent=main
+    UI.bar=bar
+
+    local function mkBtn(x,y,w,text,bg)
+        local b=Instance.new("TextButton")
+        b.Size=UDim2.new(0,w,0,36)
+        b.Position=UDim2.new(0,x,0,y)
+        b.BackgroundColor3=bg
+        b.BackgroundTransparency=0.18
+        b.BorderSizePixel=0
+        b.Text=text
+        b.TextColor3=Color3.new(1,1,1)
+        b.TextSize=state.fontSize-2
+        b.Font=Enum.Font.GothamBold
+        b.Parent=bar
+        return b
+    end
+
+    local bSave   = mkBtn(0,   0, 78, "💾保存", Config.Colors.Success)
+    local bExport = mkBtn(86,  0, 78, "📤导出", Color3.fromRGB(0,150,255))
+    local bCopy   = mkBtn(172, 0, 78, "📋复制", Color3.fromRGB(120,120,120))
+    local bStats  = mkBtn(258, 0, 78, "📊统计", Color3.fromRGB(150,0,255))
+    local bPeople = mkBtn(344, 0, 88, "👥名单", Color3.fromRGB(0,200,200))
+
+    local bFont   = mkBtn(0,   44, 78, "🔤字体", Color3.fromRGB(90,90,90))
+    local bClear  = mkBtn(86,  44, 78, "🗑️清空", Color3.fromRGB(255,100,0))
+    local bPin    = mkBtn(172, 44, 78, "📌置顶", Color3.fromRGB(200,0,200))
+    local bClose  = mkBtn(258, 44, 78, "⏻关闭", Config.Colors.Danger)
+    local bDummy  = mkBtn(344, 44, 88, " ", Color3.fromRGB(0,0,0))
+    bDummy.BackgroundTransparency=1
+    bDummy.Text=""
+
+    local info=Instance.new("TextLabel")
+    info.Size=UDim2.new(1,-20,0,22)
+    info.Position=UDim2.new(0,10,1,-28)
+    info.BackgroundTransparency=1
+    info.TextXAlignment=Enum.TextXAlignment.Left
+    info.Font=Enum.Font.SourceSansBold
+    info.TextSize=state.fontSize-4
+    info.TextColor3=Config.Colors.Secondary
+    info.Parent=main
+    UI.infoLabel=info
+
+    local handle=Instance.new("Frame")
+    handle.Size=UDim2.new(0,20,0,20)
+    handle.Position=UDim2.new(1,-20,1,-20)
+    handle.BackgroundColor3=Config.Colors.Secondary
+    handle.BackgroundTransparency=0.45
+    handle.BorderSizePixel=0
+    handle.Parent=main
+    UI.handle=handle
+
+    -- panels
+    local function mkPanel(sizeY, titleText, titleBg, titleTC)
+        local p=Instance.new("Frame")
+        p.Size=UDim2.new(0, 270, 0, sizeY)
+        p.Position=UDim2.new(1, -280, 0, 94)
+        p.BackgroundColor3=Config.Colors.Panel
+        p.BackgroundTransparency=0.12
+        p.BorderSizePixel=0
+        p.Visible=false
+        p.Parent=main
+        local t=Instance.new("TextLabel")
+        t.Size=UDim2.new(1,0,0,32)
+        t.BackgroundColor3=titleBg
+        t.BackgroundTransparency=0.25
+        t.BorderSizePixel=0
+        t.Text=titleText
+        t.TextColor3=titleTC
+        t.Font=Enum.Font.GothamBold
+        t.TextSize=16
+        t.Parent=p
+        return p
+    end
+    UI.panelFilter = mkPanel(270, "🧩 系统细分过滤", Config.Colors.Accent, Color3.new(0,0,0))
+    UI.panelMenu   = mkPanel(220, "⚙️ 显示项", Config.Colors.Secondary, Color3.new(0,0,0))
+
+    UI.panelPeople = Instance.new("Frame")
+    UI.panelPeople.Size=UDim2.new(0, 240, 0, 360)
+    UI.panelPeople.Position=UDim2.new(0,10,0,94)
+    UI.panelPeople.BackgroundColor3=Config.Colors.Panel
+    UI.panelPeople.BackgroundTransparency=0.12
+    UI.panelPeople.BorderSizePixel=0
+    UI.panelPeople.Visible=false
+    UI.panelPeople.Parent=main
+
+    do
+        local t=Instance.new("TextLabel")
+        t.Size=UDim2.new(1,0,0,32)
+        t.BackgroundColor3=Config.Colors.Secondary
+        t.BackgroundTransparency=0.25
+        t.BorderSizePixel=0
+        t.Text="👥 点人静音"
+        t.TextColor3=Color3.new(0,0,0)
+        t.Font=Enum.Font.GothamBold
+        t.TextSize=16
+        t.Parent=UI.panelPeople
+    end
+
+    local peopleList=Instance.new("ScrollingFrame")
+    peopleList.Size=UDim2.new(1,-10,1,-42)
+    peopleList.Position=UDim2.new(0,5,0,36)
+    peopleList.BackgroundTransparency=1
+    peopleList.BorderSizePixel=0
+    peopleList.ScrollBarThickness=6
+    peopleList.ScrollBarImageColor3=Config.Colors.Secondary
+    peopleList.Parent=UI.panelPeople
+
+    local pplLayout=Instance.new("UIListLayout")
+    pplLayout.Padding=UDim.new(0,6)
+    pplLayout.SortOrder=Enum.SortOrder.LayoutOrder
+    pplLayout.Parent=peopleList
+    pplLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        if uiAlive() then peopleList.CanvasSize=UDim2.new(0,0,0,pplLayout.AbsoluteContentSize.Y+10) end
+    end)
+
+    -- filter toggles
+    local function mkToggle(parent, y, key, label, onColor)
+        local row=Instance.new("TextButton")
+        row.Size=UDim2.new(1,-12,0,28)
+        row.Position=UDim2.new(0,6,0,y)
+        row.BackgroundColor3=Color3.fromRGB(0,0,0)
+        row.BackgroundTransparency=0.55
+        row.BorderSizePixel=0
+        row.Text=""
+        row.Parent=parent
+
+        local txt=Instance.new("TextLabel")
+        txt.BackgroundTransparency=1
+        txt.Size=UDim2.new(1,-60,1,0)
+        txt.Position=UDim2.new(0,10,0,0)
+        txt.TextXAlignment=Enum.TextXAlignment.Left
+        txt.Font=Enum.Font.GothamBold
+        txt.TextSize=13
+        txt.TextColor3=Color3.new(1,1,1)
+        txt.Text=label
+        txt.Parent=row
+
+        local tag=Instance.new("TextLabel")
+        tag.BackgroundTransparency=1
+        tag.Size=UDim2.new(0,50,1,0)
+        tag.Position=UDim2.new(1,-54,0,0)
+        tag.Font=Enum.Font.GothamBold
+        tag.TextSize=12
+        tag.TextColor3=Color3.new(1,1,1)
+        tag.Parent=row
+
+        local st=Instance.new("UIStroke")
+        st.Thickness=1
+        st.Parent=row
+
+        local function refresh()
+            local on=CategoryFilter[key]
+            tag.Text = on and "ON" or "OFF"
+            if on then
+                row.BackgroundTransparency=0.35
+                st.Transparency=0.25
+                st.Color=onColor
+            else
+                row.BackgroundTransparency=0.7
+                st.Transparency=0.8
+                st.Color=Config.Colors.Dim
+            end
+        end
+        refresh()
+
+        row.MouseButton1Click:Connect(function()
+            CategoryFilter[key]=not CategoryFilter[key]
+            refresh()
+            renderAll()
+        end)
+    end
+
+    mkToggle(UI.panelFilter, 44,  "SYS_START",     "🚀 启动/初始化", Config.Colors.Secondary)
+    mkToggle(UI.panelFilter, 76,  "SYS_CHATFLOW",  "💬 聊天系统状态", Config.Colors.Secondary)
+    mkToggle(UI.panelFilter, 108, "SYS_JOINLEAVE", "🚪 玩家进出", Config.Colors.Secondary)
+    mkToggle(UI.panelFilter, 140, "SYS_STATS",     "📊 统计输出", Config.Colors.Accent)
+    mkToggle(UI.panelFilter, 172, "SYS_SAVE",      "💾 保存", Config.Colors.Success)
+    mkToggle(UI.panelFilter, 204, "SYS_EXPORT",    "📤 导出/复制", Color3.fromRGB(0,150,255))
+    mkToggle(UI.panelFilter, 236, "SYS_HINT",      "💡 提示", Config.Colors.Accent)
+
+    -- menu toggles
+    local function mkMini(parent, y, key, label)
+        local row=Instance.new("TextButton")
+        row.Size=UDim2.new(1,-12,0,28)
+        row.Position=UDim2.new(0,6,0,y)
+        row.BackgroundColor3=Color3.fromRGB(0,0,0)
+        row.BackgroundTransparency=0.55
+        row.BorderSizePixel=0
+        row.Text=""
+        row.Parent=parent
+
+        local txt=Instance.new("TextLabel")
+        txt.BackgroundTransparency=1
+        txt.Size=UDim2.new(1,-60,1,0)
+        txt.Position=UDim2.new(0,10,0,0)
+        txt.TextXAlignment=Enum.TextXAlignment.Left
+        txt.Font=Enum.Font.GothamBold
+        txt.TextSize=13
+        txt.TextColor3=Color3.new(1,1,1)
+        txt.Text=label
+        txt.Parent=row
+
+        local tag=Instance.new("TextLabel")
+        tag.BackgroundTransparency=1
+        tag.Size=UDim2.new(0,50,1,0)
+        tag.Position=UDim2.new(1,-54,0,0)
+        tag.Font=Enum.Font.GothamBold
+        tag.TextSize=12
+        tag.TextColor3=Color3.new(1,1,1)
+        tag.Parent=row
+
+        local function refresh() tag.Text = Features[key] and "ON" or "OFF" end
+        refresh()
+
+        row.MouseButton1Click:Connect(function()
+            Features[key]=not Features[key]
+            refresh()
+            updateInfo()
+        end)
+    end
+
+    mkMini(UI.panelMenu, 44,  "showPlayers",  "👥 在线人数")
+    mkMini(UI.panelMenu, 76,  "showRuntime",  "⏱️ 运行时间")
+    mkMini(UI.panelMenu, 108, "showWordCount","📚 字库词数")
+    mkMini(UI.panelMenu, 140, "showSwearRate","🤬 脏话率(近窗)")
+    mkMini(UI.panelMenu, 172, "smoothAnimations","🧈 动画")
+
+    -- bind
+    search:GetPropertyChangedSignal("Text"):Connect(function()
+        UI.filterText = string.lower(search.Text or "")
+        renderAll()
+    end)
+
+    btnMenu.MouseButton1Click:Connect(function()
+        if state.isCollapsed then return end
+        UI.panelMenu.Visible = not UI.panelMenu.Visible
+        if UI.panelMenu.Visible then UI.panelFilter.Visible=false end
+    end)
+
+    btnFilter.MouseButton1Click:Connect(function()
+        if state.isCollapsed then return end
+        UI.panelFilter.Visible = not UI.panelFilter.Visible
+        if UI.panelFilter.Visible then UI.panelMenu.Visible=false end
+    end)
+
+    btnHide.MouseButton1Click:Connect(function()
+        state.uiVisible = not state.uiVisible
+        if uiAlive() then UI.main.Visible = state.uiVisible end
+        btnHide.Text = state.uiVisible and "✖" or "◉"
+    end)
+
+    btnFoldTop.MouseButton1Click:Connect(function()
+        state.isCollapsed = not state.isCollapsed
+        applyCollapsedUI()
+    end)
+
+    bPeople.MouseButton1Click:Connect(function()
+        if state.isCollapsed then return end
+        UI.panelPeople.Visible = not UI.panelPeople.Visible
+        if UI.panelPeople.Visible then rebuildPeopleList(peopleList) end
+        UI.panelMenu.Visible=false
+        UI.panelFilter.Visible=false
+    end)
+
+    -- drag
+    local dragging=false
+    local dragOffset=Vector2.new()
     titleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch or 
-           input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
-            dragOffset = Vector2.new(input.Position.X - mainFrame.AbsolutePosition.X, 
-                                     input.Position.Y - mainFrame.AbsolutePosition.Y)
-            titleBar.BackgroundTransparency = 0
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            dragging=true
+            dragOffset=Vector2.new(input.Position.X-main.AbsolutePosition.X, input.Position.Y-main.AbsolutePosition.Y)
         end
     end)
-    
-    titleBar.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.Touch or 
-                        input.UserInputType == Enum.UserInputType.MouseMovement) then
-            local newPos = Vector2.new(input.Position.X - dragOffset.X, 
-                                       input.Position.Y - dragOffset.Y)
-            mainFrame.Position = UDim2.new(0, newPos.X, 0, newPos.Y)
-        end
-    end)
-    
     titleBar.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch or 
-           input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = false
-            titleBar.BackgroundTransparency = 0.2
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragging=false end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging or not uiAlive() then return end
+        if input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch then
+            main.Position=UDim2.new(0, input.Position.X-dragOffset.X, 0, input.Position.Y-dragOffset.Y)
         end
     end)
-    
-    -- ===== 折叠功能 =====
-    titleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch or 
-           input.UserInputType == Enum.UserInputType.MouseButton1 then
-            task.wait(0.1)
-            if not dragging then
-                toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, resizeHandle, collapseIcon)
-            end
+
+    -- resize
+    local resizing=false
+    local rs=Vector2.new()
+    local rsz=Vector2.new()
+    handle.InputBegan:Connect(function(input)
+        if state.isCollapsed then return end
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            resizing=true
+            rs=Vector2.new(input.Position.X, input.Position.Y)
+            rsz=Vector2.new(main.AbsoluteSize.X, main.AbsoluteSize.Y)
+            handle.BackgroundTransparency=0.2
         end
     end)
-    
-    -- ===== 调整大小功能 =====
-    resizeHandle.InputBegan:Connect(function(input)
-        if isCollapsed then return end
-        if input.UserInputType == Enum.UserInputType.Touch or 
-           input.UserInputType == Enum.UserInputType.MouseButton1 then
-            resizing = true
-            resizeStart = Vector2.new(input.Position.X, input.Position.Y)
-            resizeStartSize = Vector2.new(mainFrame.AbsoluteSize.X, mainFrame.AbsoluteSize.Y)
-            resizeHandle.BackgroundTransparency = 0
+    handle.InputEnded:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            resizing=false
+            handle.BackgroundTransparency=0.45
         end
     end)
-    
-    resizeHandle.InputChanged:Connect(function(input)
-        if not resizing or isCollapsed then return end
-        if input.UserInputType == Enum.UserInputType.Touch or 
-           input.UserInputType == Enum.UserInputType.MouseMovement then
-            local delta = Vector2.new(input.Position.X - resizeStart.X, 
-                                      input.Position.Y - resizeStart.Y)
-            local newWidth = math.clamp(resizeStartSize.X + delta.X, Config.MinWidth, Config.MaxWidth)
-            local newHeight = math.clamp(resizeStartSize.Y + delta.Y, Config.MinHeight, Config.MaxHeight)
-            
-            mainFrame.Size = UDim2.new(0, newWidth, 0, newHeight)
-            currentWidth = newWidth
-            currentHeight = newHeight
+    UserInputService.InputChanged:Connect(function(input)
+        if not resizing or state.isCollapsed or not uiAlive() then return end
+        if input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch then
+            local d=Vector2.new(input.Position.X-rs.X, input.Position.Y-rs.Y)
+            state.width = clamp(rsz.X+d.X, Config.MinWidth, Config.MaxWidth)
+            state.height= clamp(rsz.Y+d.Y, Config.MinHeight, Config.MaxHeight)
+            main.Size=UDim2.new(0,state.width,0,state.height)
+            setPinnedPosition()
         end
     end)
-    
-    resizeHandle.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch or 
-           input.UserInputType == Enum.UserInputType.MouseButton1 then
-            resizing = false
-            resizeHandle.BackgroundTransparency = 0.5
-        end
-    end)
-    
-    -- 动态光效
-    RunService.Heartbeat:Connect(function()
-        glowIntensity = (glowIntensity + 0.02) % (math.pi * 2)
-        local alpha = 0.85 + math.sin(glowIntensity) * 0.1
-        glow.BackgroundTransparency = alpha
-        border.BorderColor3 = Color3.new(
-            Config.Colors.Primary.r * (0.8 + math.sin(glowIntensity) * 0.2),
-            Config.Colors.Primary.g * (0.8 + math.sin(glowIntensity) * 0.2),
-            Config.Colors.Primary.b * (0.8 + math.sin(glowIntensity) * 0.2)
-        )
-    end)
-    
-    -- ===== 按钮功能 =====
-    hideButton.MouseButton1Click:Connect(function()
-        uiVisible = not uiVisible
-        mainFrame.Visible = uiVisible
-        hideButton.Text = uiVisible and "✖" or "◉"
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
-    end)
-    
-    saveBtn.MouseButton1Click:Connect(function()
-        if isCollapsed then toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, resizeHandle, collapseIcon) end
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
-        
-        if isSaving then
-            addMessage("💾 系统：正在保存中...", true)
-            return
-        end
-        
-        saveBtn.Text = "⏳..."
-        saveBtn.BackgroundColor3 = Color3.fromRGB(255, 165, 0)
-        
-        saveToFileAsync(function(success, errorMsg)
-            if success then
-                saveBtn.Text = "✅"
-                saveBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
-                addMessage("💾 系统：保存成功！", true)
-            else
-                saveBtn.Text = "❌"
-                saveBtn.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-                addMessage("💾 系统：保存失败 - " .. (errorMsg or "未知错误"), true)
-            end
-            
-            task.wait(1.5)
-            saveBtn.Text = "💾保存"
-            saveBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+
+    -- actions
+    bSave.MouseButton1Click:Connect(function()
+        if state.isSaving then addSystem("正在保存中...", "SYS_SAVE") return end
+        bSave.Text="⏳..."
+        bSave.BackgroundColor3=Color3.fromRGB(255,165,0)
+        saveToFileAsync(function(ok,err)
+            if ok then addSystem("保存成功","SYS_SAVE"); bSave.Text="✅"; bSave.BackgroundColor3=Config.Colors.Success
+            else addSystem("保存失败 - "..tostring(err),"SYS_SAVE"); bSave.Text="❌"; bSave.BackgroundColor3=Config.Colors.Danger end
+            task.wait(1.0)
+            bSave.Text="💾保存"; bSave.BackgroundColor3=Config.Colors.Success
         end)
     end)
-    
-    clearBtn.MouseButton1Click:Connect(function()
-        if isCollapsed then toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, resizeHandle, collapseIcon) end
-        chatHistory = {}
-        messageStats = {}
-        messageCount = 0
-        BaZhiStats = {
-            swearMessages = 0,
-            exclamationCount = 0,
-            questionCount = 0,
-            chineseExclamationCount = 0,
-            chineseQuestionCount = 0,
-            emojiCount = 0,
-            capsCount = 0,
-            hashtagCount = 0,
-            hashtagMessages = 0,
-            totalMessages = 0,
-            consecutiveCaps = 0,
-            capsMessages = 0,
-            repeatExclamation = 0,
-            repeatQuestion = 0,
-            repeatChineseExclamation = 0,
-            repeatChineseQuestion = 0,
-            messageLengths = {},
-            messageTimestamps = {},
-            lastMessageTime = startTime,
-            burstCount = 0,
-        }
-        scrollFrame:ClearAllChildren()
-        scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
-        addMessage("🗑️ 系统：聊天记录已清空", true)
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
+
+    bExport.MouseButton1Click:Connect(function()
+        saveToFileAsync(function(ok,err)
+            if ok then addSystem("导出成功（已保存文件）","SYS_EXPORT")
+            else addSystem("导出失败 - "..tostring(err),"SYS_EXPORT") end
+        end)
     end)
-    
-    exportBtn.MouseButton1Click:Connect(function()
-        if isCollapsed then toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, resizeHandle, collapseIcon) end
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
-        
-        if isSaving then
-            addMessage("📤 系统：正在导出中...", true)
-            return
+
+    bCopy.MouseButton1Click:Connect(function()
+        local all=table.concat(state.chatHistory,"\n")
+        if setclipboard then
+            pcall(function() setclipboard(all) end)
+            addSystem(("已复制到剪贴板（%d条）"):format(#state.chatHistory),"SYS_EXPORT")
+        else
+            addSystem("当前环境不支持 setclipboard","SYS_EXPORT")
         end
-        
-        exportBtn.Text = "⏳..."
-        exportBtn.BackgroundColor3 = Color3.fromRGB(255, 165, 0)
-        
-        saveToFileAsync(function(success, errorMsg)
-            if success then
-                exportBtn.Text = "✅"
-                exportBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 255)
-                addMessage("📤 系统：导出成功！", true)
-                pcall(function() 
-                    setclipboard("文件已保存：" .. Config.FileName)
+    end)
+
+    bStats.MouseButton1Click:Connect(function()
+        local bz=computeBaZhi()
+        local lvl=select(1,getBaZhiLevel(bz))
+        addSystem("════ 近窗统计(Detector) ════","SYS_STATS")
+        addSystem(("狂暴值：%d%% 等级：%s"):format(bz,lvl),"SYS_STATS")
+        addSystem(("脏话率(近窗)：%d%% | Detector:%s | 字库:%d")
+            :format(getSwearRateWindow(), det and "ON" or "OFF", totalWordCount), "SYS_STATS")
+    end)
+
+    bFont.MouseButton1Click:Connect(function()
+        local sizes={14,18,22,26}
+        local idx=1
+        for i,s in ipairs(sizes) do if state.fontSize==s then idx=i break end end
+        state.fontSize = sizes[idx%#sizes+1]
+        addSystem("字体大小 = "..tostring(state.fontSize),"SYS_HINT")
+        renderAll(); updateInfo()
+    end)
+
+    bClear.MouseButton1Click:Connect(function()
+        state.chatHistory={}
+        state.renderQueue={}
+        Window.items={}
+        state.messageStats={}
+        addSystem("已清空记录/近窗统计","SYS_HINT")
+        renderAll(); updateInfo()
+    end)
+
+    local pinCycle={"BR","TR","TL","BL"} local pinIndex=1
+    bPin.MouseButton1Click:Connect(function()
+        pinIndex = pinIndex%#pinCycle+1
+        state.pinned = pinCycle[pinIndex]
+        setPinnedPosition()
+        addSystem("置顶位置 = "..state.pinned,"SYS_HINT")
+    end)
+
+    bClose.MouseButton1Click:Connect(function()
+        if UI.gui then UI.gui:Destroy() end
+        UI.gui=nil; UI.main=nil; UI.scroll=nil
+        addSystem("UI已关闭（后台继续记录）","SYS_HINT")
+    end)
+
+    -- join/leave logs
+    Players.PlayerAdded:Connect(function(p)
+        addSystem(p.Name.." 加入了游戏","SYS_JOINLEAVE")
+        if uiAlive() and UI.panelPeople.Visible then rebuildPeopleList(peopleList) end
+    end)
+    Players.PlayerRemoving:Connect(function(p)
+        addSystem(p.Name.." 离开了游戏","SYS_JOINLEAVE")
+        if uiAlive() and UI.panelPeople.Visible then rebuildPeopleList(peopleList) end
+    end)
+
+    setPinnedPosition()
+    updateInfo()
+    addSystem(("启动完成：Detector=%s | 字库词数=%d"):format(det and "ON" or "OFF", totalWordCount),"SYS_START")
+    renderAll()
+    applyCollapsedUI()
+end
+
+-- ===== Ticker / AutoSave =====
+local function startTicker()
+    local interval=1/Config.StatsUpdateHz
+    local acc=0
+    RunService.Heartbeat:Connect(function(dt)
+        acc += dt
+        if acc >= interval then acc=0; updateInfo() end
+    end)
+end
+
+local function startAutoSave()
+    task.spawn(function()
+        while true do
+            task.wait(Config.AutoSaveInterval)
+            if #state.chatHistory>0 and not state.isSaving then
+                saveToFileAsync(function(ok)
+                    if ok then addSystem("自动保存完成","SYS_SAVE") end
                 end)
-            else
-                exportBtn.Text = "❌"
-                exportBtn.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-                addMessage("📤 系统：导出失败 - " .. (errorMsg or "未知错误"), true)
-            end
-            
-            task.wait(1.5)
-            exportBtn.Text = "📤导出"
-            exportBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 255)
-        end)
-    end)
-    
-    statsBtn.MouseButton1Click:Connect(function()
-        if isCollapsed then toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, resizeHandle, collapseIcon) end
-        showDetailedStats()
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
-    end)
-    
-    fontBtn.MouseButton1Click:Connect(function()
-        if isCollapsed then toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, resizeHandle, collapseIcon) end
-        local sizes = {14, 18, 22, 26}
-        local currentIndex = 1
-        for i, size in ipairs(sizes) do
-            if currentFontSize == size then
-                currentIndex = i
-                break
             end
         end
-        currentFontSize = sizes[currentIndex % #sizes + 1]
-        addMessage("🔤 系统：字体大小 = " .. currentFontSize, true)
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
     end)
-    
-    copyBtn.MouseButton1Click:Connect(function()
-        if isCollapsed then toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, resizeHandle, collapseIcon) end
-        local allText = table.concat(chatHistory, "\n")
+end
+
+-- ===== Chat capture (不覆盖 OnIncomingMessage) + 去重 =====
+local Dedup = {}
+local DEDUP_WINDOW = 0.35
+local function dedupKey(speaker, text) return tostring(speaker or "nil").."│"..tostring(text or "") end
+local function passDedup(speaker, text)
+    local t=os.clock()
+    local k=dedupKey(speaker,text)
+    local last=Dedup[k]
+    Dedup[k]=t
+    if math.random(1,20)==5 then
+        for kk,vt in pairs(Dedup) do if (t-vt)>2.0 then Dedup[kk]=nil end end
+    end
+    return (last==nil) or ((t-last)>DEDUP_WINDOW)
+end
+
+local function onCaptured(speaker, text, src)
+    if type(text)~="string" or text=="" then return end
+    if not passDedup(speaker, text) then return end
+    addChat(speaker or "未知", text)
+end
+
+local function hookTCS_MessageReceived()
+    if not TextChatService then return false end
+    local ok, ver = pcall(function() return TextChatService.ChatVersion end)
+    if not ok or ver ~= Enum.ChatVersion.TextChatService then return false end
+    if typeof(TextChatService.MessageReceived) ~= "RBXScriptSignal" then return false end
+
+    TextChatService.MessageReceived:Connect(function(msg)
+        local speaker="未知"
+        local text=""
         pcall(function()
-            setclipboard(allText)
-            addMessage("📋 系统：已复制到剪贴板 (" .. #chatHistory .. "条)", true)
+            text = msg.Text or ""
+            if msg.TextSource and msg.TextSource.UserId then
+                local p = Players:GetPlayerByUserId(msg.TextSource.UserId)
+                if p then speaker = p.Name end
+            end
         end)
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
+        onCaptured(speaker, text, "TCS")
     end)
-    
-    -- 主题切换
-    local themeIndex = 1
-    local themes = {
-        {Primary = Color3.fromRGB(255, 45, 85), Secondary = Color3.fromRGB(0, 255, 255), Name = "霓虹粉"},
-        {Primary = Color3.fromRGB(0, 255, 0), Secondary = Color3.fromRGB(255, 0, 255), Name = "赛博绿"},
-        {Primary = Color3.fromRGB(255, 200, 0), Secondary = Color3.fromRGB(0, 200, 255), Name = "土豪金"},
-        {Primary = Color3.fromRGB(150, 0, 255), Secondary = Color3.fromRGB(0, 255, 150), Name = "紫罗兰"},
-    }
-    
-    themeBtn.MouseButton1Click:Connect(function()
-        if isCollapsed then toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, resizeHandle, collapseIcon) end
-        themeIndex = themeIndex % #themes + 1
-        Config.Colors.Primary = themes[themeIndex].Primary
-        Config.Colors.Secondary = themes[themeIndex].Secondary
-        
-        titleBar.BackgroundColor3 = Config.Colors.Primary
-        border.BorderColor3 = Config.Colors.Primary
-        scrollFrame.ScrollBarImageColor3 = Config.Colors.Secondary
-        resizeHandle.BackgroundColor3 = Config.Colors.Secondary
-        
-        addMessage("🎨 系统：主题已切换为 " .. themes[themeIndex].Name, true)
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
-    end)
-    
-    -- 预设大小
-    local sizes = {{420,600}, {500,700}, {600,800}, {350,500}}
-    local sizeIndex = 1
-    
-    resizeBtn.MouseButton1Click:Connect(function()
-        if isCollapsed then toggleCollapse(mainFrame, scrollFrame, buttonGrid, countLabel, resizeHandle, collapseIcon) end
-        sizeIndex = sizeIndex % #sizes + 1
-        currentWidth = sizes[sizeIndex][1]
-        currentHeight = sizes[sizeIndex][2]
-        mainFrame.Size = UDim2.new(0, currentWidth, 0, currentHeight)
-        addMessage("📏 系统：界面大小预设 " .. currentWidth .. "x" .. currentHeight, true)
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
-    end)
-    
-    closeBtn.MouseButton1Click:Connect(function()
-        gui:Destroy()
-        print("💀 UI已关闭，后台持续记录中...")
-        pcall(function() game:GetService("VibrationService"):Vibrate("Light") end)
-    end)
-    
-    -- 启动消息
-    addMessage("💀 系统：贴吧狂暴记录器 v14.5", true)
-    addMessage("💀 系统：真emoji检测版", true)
-    addMessage("💀 系统：汉字/数字/英文不算emoji", true)
-    addMessage("💀 系统：只统计😂🤣😅等真表情", true)
-    addMessage("💀 系统：字库词数 = " .. #swearWordList .. "个", true)
+    addSystem("聊天源：TCS.MessageReceived ✅","SYS_CHATFLOW")
+    return true
 end
 
--- ===== 监听聊天 =====
-local function setupChatListener()
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= localPlayer then
-            player.Chatted:Connect(function(msg) addMessage(player.Name .. "： " .. msg) end)
-        end
-    end
-    
-    Players.PlayerAdded:Connect(function(player)
-        player.Chatted:Connect(function(msg) addMessage(player.Name .. "： " .. msg) end)
-        addMessage("🚪 系统：" .. player.Name .. " 加入了游戏", true)
+local function hookDefaultChatEvents()
+    local ev = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+    if not ev then return false end
+    local r = ev:FindFirstChild("OnMessageDoneFiltering")
+    if not r or not r:IsA("RemoteEvent") then return false end
+
+    r.OnClientEvent:Connect(function(md)
+        local speaker = (type(md)=="table" and (md.FromSpeaker or md.FromSpeakerName)) or "未知"
+        local text = (type(md)=="table" and (md.Message or md.MessageText)) or ""
+        onCaptured(speaker, tostring(text or ""), "DefaultChatEvents")
     end)
-    
-    Players.PlayerRemoving:Connect(function(player)
-        addMessage("🚪 系统：" .. player.Name .. " 离开了游戏", true)
-    end)
-    
-    if localPlayer then
-        localPlayer.Chatted:Connect(function(msg) 
-            addMessage("我： " .. msg)
-        end)
-    end
+    addSystem("聊天源：DefaultChatEvents ✅","SYS_CHATFLOW")
+    return true
 end
 
--- ===== 自动保存 =====
-task.spawn(function()
-    while true do
-        task.wait(180)
-        if #chatHistory > 0 and not isSaving then
-            saveToFileAsync(function(success)
-                if success then
-                    print("💀 自动保存完成，狂暴值：" .. calculateBaZhiIndex() .. "%")
-                end
-            end)
-        end
+local function hookLegacyChatted()
+    local function bind(p)
+        p.Chatted:Connect(function(msg)
+            onCaptured(p.Name, msg, "Chatted")
+        end)
     end
-end)
+    for _,p in ipairs(Players:GetPlayers()) do bind(p) end
+    Players.PlayerAdded:Connect(bind)
+    addSystem("聊天源：Player.Chatted ✅","SYS_CHATFLOW")
+    return true
+end
 
--- ===== 启动！ =====
+-- ===== Boot =====
 createUI()
-setupChatListener()
+startTicker()
+startAutoSave()
 
-print("╔══════════════════════════════════════════════════════════════╗")
-print("║     💀 启动成功！真emoji检测版 v14.5！ 💀                   ║")
-print("║    修复内容：                                                ║")
-print("║    ✅ 只统计真正的emoji表情符号                             ║")
-print("║    ✅ 汉字/数字/英文不算emoji了！                           ║")
-print("║    ✅ 修复第1337行括号语法错误                               ║")
-print("║    现在：                                                   ║")
-print("║    - '😂' → 1个emoji ✅                                     ║")
-print("║    - '草' → 0个emoji ✅                                     ║")
-print("║    - '123' → 0个emoji ✅                                    ║")
-print("║    - 'ABC' → 0个emoji ✅                                    ║")
-print("║    字库链接：                                                ║")
-print("║    https://raw.githubusercontent.com/dtbile/-/main/words.txt ║")
-print("║    字库词数：" .. #swearWordList .. "个                                 ║")
-print("╚══════════════════════════════════════════════════════════════╝")
+local any=false
+any = hookTCS_MessageReceived() or any
+any = hookDefaultChatEvents() or any
+any = hookLegacyChatted() or any
+
+if not any then
+    addSystem("⚠️ 未检测到可用聊天源：该游戏可能完全自定义聊天UI（不走默认管线）","SYS_CHATFLOW")
+end
