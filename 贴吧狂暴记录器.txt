@@ -24,7 +24,7 @@ local playerGui = localPlayer:WaitForChild("PlayerGui")
 
 -- ===== 你只需要改这里 =====
 local DETECTOR_URL = "https://raw.githubusercontent.com/dtbile/-/refs/heads/main/words.txt" -- Detector引擎（return Detector）
-local WORDS_TABLE_URL = "" -- 你的字库 raw（必须 return table），没有就留空用内置fallback
+local WORDS_TABLE_URL = "https://raw.githubusercontent.com/dtbile/-/refs/heads/main/words.lua" -- 你的字库 raw（必须 return table），没有就留空用内置fallback
 -- ======================
 
 -- ===== Config =====
