@@ -1,13 +1,18 @@
--- 贴吧狂暴记录器 v1.0.6 FINAL（稳定版）
--- ✅ ### 必计脏话（无论 Detector 是否 ON）
--- ✅ Detector UTF-8 崩溃兜底（invalid UTF-8 code 不会让 Detector 直接 OFF）
--- ✅ 拖拽/缩放不吸角（只有按📌置顶才吸角；拖/缩会自动取消置顶）
--- ✅ 三路抓聊天：TCS.MessageReceived + DefaultChatSystemChatEvents + Player.Chatted
--- ✅ 玩家进出记录
--- ✅ 搜索过滤/复制/保存/清空/统计/静音名单/折叠展开/置顶
+-- 贴吧狂暴记录器 v1.0.6 (Full Fix) + 可选 Detector
+-- 特别修复：
+-- 1) 彻底解决“复制过长/被截断 → Line 1 Incomplete statement”：
+--    请把本文件上传到 GitHub，然后用下面“Loader 一键启动”加载。
+-- 2) ### / 任意包含 # 的消息：强制计为“脏话命中”
+-- 3) Detector 字库 UTF-8 坏字节：构建前自动清洗（防 invalid UTF-8 code）
+-- 4) resize 不吸角瞬移：默认 pinEnabled=false；点📌置顶才吸角；拖动/缩放自动取消置顶
+-- 5) 聊天抓取：TextChatService.MessageReceived + DefaultChatSystemChatEvents + Player.Chatted（不覆盖 OnIncomingMessage）
+--
+-- Loader（把本文件放到 github: main/tb_recorder.lua 后）：
+-- loadstring(game:HttpGet("https://raw.githubusercontent.com/<YOU>/<REPO>/main/tb_recorder.lua"))()
 
 repeat task.wait() until game:GetService("Players").LocalPlayer
 
+-- ===== Services =====
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
@@ -20,759 +25,926 @@ if not okTCS then TextChatService = nil end
 local lp = Players.LocalPlayer
 local pg = lp:WaitForChild("PlayerGui")
 
---========================
--- 你可选：Detector/字库（不填也能跑）
---========================
-local DETECTOR_URL    = "https://raw.githubusercontent.com/dtbile/-/main/检测引擎.txt" -- 你的 Detector.lua raw（return Detector），不填就纯本地规则
-local WORDS_TABLE_URL = "https://raw.githubusercontent.com/dtbile/-/refs/heads/main/words.lua" -- 你的 words.lua raw（return table），不填就用内置 fallback
+-- ===== URLs（可选）=====
+-- 建议：Detector 用 /main/，别用 /refs/heads/
+local DETECTOR_URL    = "https://raw.githubusercontent.com/dtbile/-/main/检测引擎.txt" -- return Detector
+local WORDS_TABLE_URL = "https://raw.githubusercontent.com/dtbile/-/main/words.lua"  -- 你的 words.lua raw（return table）。留空则 fallback
 
---========================
--- Config
---========================
-local C = {
-	Version = "v1.0.6",
-	FileName = "贴吧聊天记录.txt",
+-- ===== Config =====
+local Config = {
+    Version = "v1.0.6",
+    FileName = "贴吧聊天记录.txt",
 
-	MaxHistory = 4000,
-	MaxRender = 320,
-	RenderQueueMax = 1600,
+    MaxHistory = 4000,
+    MaxRender = 320,
+    RenderQueueMax = 1600,
+    AutoSaveInterval = 180,
+    SaveTimeout = 3,
 
-	DefaultWidth = 560,
-	DefaultHeight = 760,
-	MinWidth = 360,
-	MinHeight = 240,
-	MaxWidth = 980,
-	MaxHeight = 1100,
-	CollapsedHeight = 96,
+    DefaultWidth = 540,
+    DefaultHeight = 760,
+    MinWidth = 360,
+    MinHeight = 220,
+    MaxWidth = 980,
+    MaxHeight = 1100,
+    CollapsedHeight = 96,
 
-	StatsHz = 4,
-	WindowSeconds = 180,
-	WindowMax = 180,
-	BurstSeconds = 4,
+    FontSize = 18,
+    SmoothAnimations = true,
+    StatsUpdateHz = 4,
 
-	FontSize = 18,
+    WindowSeconds = 180,
+    WindowMaxMessages = 200,
+    BurstSeconds = 4,
 
-	Colors = {
-		Primary   = Color3.fromRGB(255,45,85),
-		Secondary = Color3.fromRGB(0,255,255),
-		Accent    = Color3.fromRGB(255,215,0),
-		Bg        = Color3.fromRGB(6,6,14),
-		Panel     = Color3.fromRGB(14,14,24),
-		Text      = Color3.fromRGB(245,245,245),
-		System    = Color3.fromRGB(255,215,0),
-		Muted     = Color3.fromRGB(140,140,140),
-		Danger    = Color3.fromRGB(255,70,70),
-		Success   = Color3.fromRGB(0,200,0),
-		Dim       = Color3.fromRGB(170,170,170),
-	},
+    Colors = {
+        Primary   = Color3.fromRGB(255, 45, 85),
+        Secondary = Color3.fromRGB(0, 255, 255),
+        Accent    = Color3.fromRGB(255, 215, 0),
+        Background= Color3.fromRGB(5, 5, 15),
+        Panel     = Color3.fromRGB(12, 12, 20),
+        Text      = Color3.fromRGB(255, 255, 255),
+        System    = Color3.fromRGB(255, 215, 0),
+        Muted     = Color3.fromRGB(130, 130, 130),
+        Danger    = Color3.fromRGB(255, 60, 60),
+        Success   = Color3.fromRGB(0, 200, 0),
+        Dim       = Color3.fromRGB(160, 160, 160),
+    }
 }
 
+local Features = {
+    showPlayers = true,
+    showRuntime = true,
+    showWordCount = true,
+    showSwearRate = true,
+    smoothAnimations = true,
+}
+
+local CategoryFilter = {
+    showCHAT = true,
+    showSYSTEM = true,
+
+    SYS_START = true,
+    SYS_CHATFLOW = true,
+    SYS_JOINLEAVE = true,
+    SYS_STATS = true,
+    SYS_SAVE = true,
+    SYS_EXPORT = true,
+    SYS_HINT = true,
+}
+
+-- ===== Utils =====
 local function clamp(n,a,b) if n<a then return a elseif n>b then return b else return n end end
 local function nowStr() return os.date("%Y-%m-%d %H:%M:%S") end
-local function tween(obj,t,props)
-	if not obj then return end
-	TweenService:Create(obj, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
-end
+local function nz(x,d) if type(x)=="number" then return x else return d or 0 end end
 
---========================
--- UTF8 清洗：防 Detector.new invalid UTF-8 code
---========================
-local function sanitizeUtf8(s)
-	if type(s)~="string" or s=="" then return "" end
-	local out={}
-	local i=1
-	local n=#s
-	while i<=n do
-		local b=s:byte(i)
-		if b<0x80 then
-			out[#out+1]=string.char(b); i+=1
-		else
-			local len
-			if b>=0xC2 and b<=0xDF then len=2
-			elseif b>=0xE0 and b<=0xEF then len=3
-			elseif b>=0xF0 and b<=0xF4 then len=4
-			else i+=1; goto continue end
-			if i+len-1>n then break end
-			local ok=true
-			for j=1,len-1 do
-				local bb=s:byte(i+j)
-				if not bb or bb<0x80 or bb>0xBF then ok=false break end
-			end
-			if ok then out[#out+1]=s:sub(i,i+len-1); i+=len else i+=1 end
-		end
-		::continue::
-	end
-	return table.concat(out)
-end
-
-local function safeHttpGet(url)
-	if not url or url=="" then return nil, "empty url" end
-	local ok, src = pcall(function() return game:HttpGet(url) end)
-	if not ok or type(src)~="string" then return nil, "httpget failed" end
-	if src:sub(1,1)=="<" and src:lower():find("<html",1,true) then
-		return nil, "got html (bad raw url / redirect)"
-	end
-	return src, nil
+local function tween(obj, t, props)
+    if not obj then return end
+    if not Config.SmoothAnimations or not Features.smoothAnimations then
+        for k,v in pairs(props) do obj[k]=v end
+        return
+    end
+    TweenService:Create(obj, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
 end
 
 local function safeLoadFromUrl(url)
-	local src, err = safeHttpGet(url)
-	if not src then return nil, err end
-	local ok2, mod = pcall(function() return loadstring(src)() end)
-	if not ok2 then return nil, "loadstring failed" end
-	return mod, nil
+    if not url or url=="" then return nil, "empty url" end
+    local ok, src = pcall(function() return game:HttpGet(url) end)
+    if not ok or type(src)~="string" then return nil, "httpget failed" end
+    if src:sub(1,1)=="<" and src:lower():find("<html",1,true) then
+        return nil, "got html (redirect/404)"
+    end
+    local ok2, mod = pcall(function() return loadstring(src)() end)
+    if not ok2 then return nil, "loadstring failed" end
+    return mod, nil
 end
 
---========================
--- Fallback 字库（Detector OFF 也能计）
---========================
-local FALLBACK_WORDS = {
-	chinese_basic={"草","操","艹","肏","日","靠","滚","爬","怼","淦","妈","爹","爷","傻逼","垃圾","废物","狗屎","狗屁","扯淡","恶心","沙雕"},
-	pinyin_abbrev={"sb","cnm","nmsl","tmd","wdnmd","mlgb","wqnmlgb"},
-	leet={"c4o","ca0","f**k","fuk","fk","sh1t","b1tch","bi7ch"},
-}
+-- ===== UTF-8 sanitize (prevents invalid UTF-8 code) =====
+local function sanitizeUtf8(s)
+    if type(s) ~= "string" or s == "" then return "" end
+    local out = {}
+    local i, n = 1, #s
+    while i <= n do
+        local b = s:byte(i)
+        if b < 0x80 then
+            out[#out+1] = string.char(b)
+            i += 1
+        else
+            local len
+            if b >= 0xC2 and b <= 0xDF then len = 2
+            elseif b >= 0xE0 and b <= 0xEF then len = 3
+            elseif b >= 0xF0 and b <= 0xF4 then len = 4
+            else
+                i += 1
+                goto continue
+            end
+            if i + len - 1 > n then break end
+            local ok = true
+            for j=1,len-1 do
+                local bb = s:byte(i+j)
+                if not bb or bb < 0x80 or bb > 0xBF then ok=false break end
+            end
+            if ok then
+                out[#out+1] = s:sub(i, i+len-1)
+                i += len
+            else
+                i += 1
+            end
+        end
+        ::continue::
+    end
+    return table.concat(out)
+end
 
 local function sanitizeWordsTable(words)
-	local cleaned={}
-	for cat,list in pairs(words) do
-		if type(list)=="table" then
-			local nl={}
-			for i=1,#list do
-				local w=list[i]
-				if type(w)=="string" then
-					local w2=sanitizeUtf8(w)
-					if w2~="" then nl[#nl+1]=w2 end
-				end
-			end
-			cleaned[cat]=nl
-		end
-	end
-	return cleaned
+    local cleaned = {}
+    local dropped = 0
+    for cat, list in pairs(words) do
+        if type(list)=="table" then
+            local nl = {}
+            for i=1,#list do
+                local w = list[i]
+                if type(w)=="string" then
+                    local w2 = sanitizeUtf8(w)
+                    if w2 ~= "" then nl[#nl+1]=w2 else dropped += 1 end
+                else
+                    dropped += 1
+                end
+            end
+            cleaned[cat]=nl
+        end
+    end
+    return cleaned, dropped
 end
 
-local wordsTable = FALLBACK_WORDS
+-- ===== Words fallback =====
+local FALLBACK_WORDS = {
+    chinese_basic = {"草","操","艹","肏","日","靠","滚","爬","怼","淦","妈","爹","爷","傻逼","垃圾","废物","狗屎","狗屁","扯淡","恶心","沙雕"},
+    pinyin_abbrev = {"sb","cnm","nmsl","tmd","wdnmd","mlgb","wqnmlgb"},
+    leet_initial  = {"c4o","ca0","f**k","fuk","fk","sh1t","b1tch","bi7ch"},
+    memes         = {"💀","🤡","🐶","👽"},
+}
+
+local wordsTable = nil
 do
-	if WORDS_TABLE_URL ~= "" then
-		local wt = select(1, safeLoadFromUrl(WORDS_TABLE_URL))
-		if type(wt)=="table" then wordsTable = wt end
-	end
-	wordsTable = sanitizeWordsTable(wordsTable)
+    if WORDS_TABLE_URL ~= "" then
+        local mod, err = safeLoadFromUrl(WORDS_TABLE_URL)
+        if type(mod)=="table" then wordsTable = mod end
+    end
+    if not wordsTable then wordsTable = FALLBACK_WORDS end
 end
 
-local function countWords(tbl)
-	local c=0
-	for _,list in pairs(tbl) do if type(list)=="table" then c += #list end end
-	return c
+local totalWordCount = 0
+do
+    for _,list in pairs(wordsTable) do
+        if type(list)=="table" then totalWordCount += #list end
+    end
 end
 
---========================
--- Detector（可选）
---========================
-local Detector, det = nil, nil
+-- ===== Detector optional =====
+local Detector = nil
+local det = nil
 local detectorStatus = "OFF"
+local droppedWords = 0
 do
-	if DETECTOR_URL ~= "" then
-		local mod = select(1, safeLoadFromUrl(DETECTOR_URL))
-		if type(mod)=="table" and type(mod.new)=="function" and type(mod.scan)=="function" then
-			Detector = mod
-		end
-	end
-	if Detector then
-		local ok, inst = pcall(function() return Detector.new(wordsTable) end)
-		if ok then det=inst; detectorStatus="ON" end
-	end
+    local mod, err = safeLoadFromUrl(DETECTOR_URL)
+    if type(mod)=="table" and type(mod.new)=="function" and type(mod.scan)=="function" then
+        Detector = mod
+    end
+end
+
+if Detector then
+    wordsTable, droppedWords = sanitizeWordsTable(wordsTable)
+    totalWordCount = 0
+    for _,list in pairs(wordsTable) do if type(list)=="table" then totalWordCount += #list end end
+
+    local ok, inst = pcall(function() return Detector.new(wordsTable) end)
+    if ok then
+        det = inst
+        detectorStatus = "ON"
+    else
+        det = nil
+        detectorStatus = "OFF"
+    end
 end
 
 local function scanDetector(msg)
-	if not det then return false, 0 end
-	msg = sanitizeUtf8(msg)
-	local ok, r = pcall(function() return det:scan(msg) end)
-	if ok and type(r)=="table" then
-		return r.hit==true, tonumber(r.score) or 0
-	end
-	return false, 0
+    if not det then return false, 0 end
+    msg = sanitizeUtf8(msg)
+    local ok, r = pcall(function() return det:scan(msg) end)
+    if ok and type(r)=="table" then
+        return r.hit==true, nz(r.score,0)
+    end
+    return false, 0
 end
 
---========================
--- State / Window stats
---========================
-local S = {
-	history={}, renderQ={},
-	muted={},
-	isCollapsed=false,
-	pinEnabled=false,
-	pinned="BR",
-	width=C.DefaultWidth, height=C.DefaultHeight,
-	fontSize=C.FontSize,
-	startTime=os.time(),
+-- ===== State =====
+local state = {
+    history = {},
+    renderQueue = {},
+    mutedPlayers = {},
+    isSaving = false,
+
+    startTime = os.time(),
+    uiVisible = true,
+    isCollapsed = false,
+
+    pinEnabled = false,
+    pinned = "BR",
+
+    fontSize = Config.FontSize,
+    width = Config.DefaultWidth,
+    height = Config.DefaultHeight,
 }
 
-local Window = { items={} } -- {t, meta}
-local function windowPrune()
-	local nowT=os.time()
-	local cutoff=nowT-C.WindowSeconds
-	while #Window.items>0 and Window.items[1].t < cutoff do table.remove(Window.items,1) end
-	while #Window.items>C.WindowMax do table.remove(Window.items,1) end
+-- ===== Window buffer =====
+local Window = { items = {} } -- {t, meta}
+
+local function windowPrune(nowT)
+    local cutoff = nowT - Config.WindowSeconds
+    while #Window.items > 0 and Window.items[1].t < cutoff do table.remove(Window.items, 1) end
+    while #Window.items > Config.WindowMaxMessages do table.remove(Window.items, 1) end
 end
+
 local function windowAdd(meta)
-	Window.items[#Window.items+1] = {t=os.time(), meta=meta}
-	windowPrune()
+    local nowT = os.time()
+    Window.items[#Window.items+1] = {t=nowT, meta=meta}
+    windowPrune(nowT)
 end
 
---========================
--- 分析：保证 ### 必计
---========================
+-- ===== Swear detection (FIXED: # always counts) =====
+local function fallbackHit(msg)
+    local m = string.lower(msg)
+    for _,list in pairs(wordsTable) do
+        if type(list)=="table" then
+            for i=1,#list do
+                local w = list[i]
+                if type(w)=="string" and w~="" then
+                    if m:find(string.lower(w),1,true) then return true end
+                end
+            end
+        end
+    end
+    return false
+end
+
 local function analyzeMsg(msg)
-	msg=tostring(msg or "")
-	local hash = select(2, msg:gsub("#",""))
-	local ex = select(2, msg:gsub("!","")) + select(2, msg:gsub("！",""))
-	local qu = select(2, msg:gsub("%?","")) + select(2, msg:gsub("？",""))
+    msg = tostring(msg or "")
+    local hash = select(2, msg:gsub("#",""))
+    local ex = select(2, msg:gsub("!","")) + select(2, msg:gsub("！",""))
+    local qu = select(2, msg:gsub("%?","")) + select(2, msg:gsub("？",""))
 
-	-- ✅ ### / # 必计
-	if hash > 0 then
-		return {swear=true, detScore=0, hash=hash, ex=ex, qu=qu}
-	end
+    if hash > 0 then
+        return {swear=true, detScore=0, hash=hash, ex=ex, qu=qu}
+    end
 
-	local hit, score = scanDetector(msg)
-	if hit then
-		return {swear=true, detScore=score, hash=0, ex=ex, qu=qu}
-	end
+    local hit, score = scanDetector(msg)
+    if hit then
+        return {swear=true, detScore=score, hash=0, ex=ex, qu=qu}
+    end
 
-	-- fallback：简单包含（Detector OFF 也能统计）
-	local lower = string.lower(msg)
-	for _,list in pairs(wordsTable) do
-		if type(list)=="table" then
-			for i=1,#list do
-				local w=list[i]
-				if type(w)=="string" and w~="" then
-					if lower:find(string.lower(w),1,true) then
-						return {swear=true, detScore=0, hash=0, ex=ex, qu=qu}
-					end
-				end
-			end
-		end
-	end
+    if fallbackHit(msg) then
+        return {swear=true, detScore=0, hash=0, ex=ex, qu=qu}
+    end
 
-	return {swear=false, detScore=0, hash=0, ex=ex, qu=qu}
+    return {swear=false, detScore=0, hash=0, ex=ex, qu=qu}
 end
 
 local function computeStats()
-	windowPrune()
-	local n=#Window.items
-	if n<2 then return 0,0,0.0,0 end
-	local swear=0
-	local detSum,hashSum,exSum,quSum=0,0,0,0
-	for i=1,n do
-		local a=Window.items[i].meta
-		if a.swear then swear+=1 end
-		detSum += a.detScore or 0
-		hashSum += a.hash or 0
-		exSum += a.ex or 0
-		quSum += a.qu or 0
-	end
-	local swearPct = math.floor((swear/n)*100)
-	local span = math.max(1, Window.items[n].t - Window.items[1].t)
-	local mps = n/span
-	local burst=0
-	do
-		local t0=Window.items[n].t
-		local c=0
-		for i=n,1,-1 do
-			if (t0-Window.items[i].t) <= C.BurstSeconds then c+=1 else break end
-		end
-		burst=c
-	end
-	local score=0
-	score += clamp((swear/n)*120,0,60)
-	score += clamp((mps/1.8)*12,0,12)
-	score += clamp((burst/7)*8,0,8)
-	score += clamp(((exSum+quSum)/n)*2.2,0,10)
-	score += clamp((hashSum/n)*4.0,0,10)
-	score += clamp(((detSum/n)/10)*4,0,4)
-	return math.floor(clamp(score,0,100)), swearPct, mps, burst
+    local nowT=os.time()
+    windowPrune(nowT)
+    local n=#Window.items
+    if n<2 then return 0,0,0.0,0 end
+
+    local swear=0
+    local detSum,hashSum,exSum,quSum=0,0,0,0
+    for i=1,n do
+        local a=Window.items[i].meta
+        if a.swear then swear+=1 end
+        detSum += a.detScore
+        hashSum += a.hash
+        exSum += a.ex
+        quSum += a.qu
+    end
+
+    local swearPct = math.floor((swear/n)*100)
+    local span = math.max(1, Window.items[n].t - Window.items[1].t)
+    local mps = n/span
+
+    local burst=0
+    do
+        local t0=Window.items[n].t
+        local c=0
+        for i=n,1,-1 do
+            if (t0-Window.items[i].t) <= Config.BurstSeconds then c+=1 else break end
+        end
+        burst=c
+    end
+
+    local score=0
+    score += clamp((swear/n)*120,0,60)
+    score += clamp((mps/1.8)*12,0,12)
+    score += clamp((burst/7)*8,0,8)
+    score += clamp(((exSum+quSum)/n)*2.2,0,10)
+    score += clamp((hashSum/n)*4.0,0,10)
+    score += clamp(((detSum/n)/10)*4,0,4)
+
+    return math.floor(clamp(score,0,100)), swearPct, mps, burst
 end
 
-local function levelName(v)
-	if v<20 then return "🕊️ 和平鸽", Color3.fromRGB(100,255,100) end
-	if v<40 then return "😐 萌新", Color3.fromRGB(200,255,100) end
-	if v<60 then return "😤 暴躁老哥", Color3.fromRGB(255,200,100) end
-	if v<80 then return "🤬 贴吧战神", Color3.fromRGB(255,100,100) end
-	return "💀 狂暴の神", Color3.fromRGB(255,50,50)
+local function getLevel(v)
+    if v < 20 then return "🕊️ 和平鸽", Color3.fromRGB(100,255,100) end
+    if v < 40 then return "😐 萌新", Color3.fromRGB(200,255,100) end
+    if v < 60 then return "😤 暴躁老哥", Color3.fromRGB(255,200,100) end
+    if v < 80 then return "🤬 贴吧战神", Color3.fromRGB(255,100,100) end
+    return "💀 狂暴の神", Color3.fromRGB(255,50,50)
 end
 
---========================
--- UI
---========================
+-- ===== UI =====
 local UI = {filterText=""}
-local function uiAlive() return UI.gui and UI.main and UI.main.Parent~=nil end
+local function uiAlive() return UI.gui and UI.main and UI.main.Parent ~= nil end
 
 local function pushHistory(line)
-	S.history[#S.history+1]=line
-	if #S.history>C.MaxHistory then table.remove(S.history,1) end
+    state.history[#state.history+1] = line
+    if #state.history > Config.MaxHistory then table.remove(state.history,1) end
 end
 
 local function pushRender(entry)
-	S.renderQ[#S.renderQ+1]=entry
-	if #S.renderQ>C.RenderQueueMax then table.remove(S.renderQ,1) end
-end
-
-function UI.renderAll()
-	if not uiAlive() or S.isCollapsed then return end
-	for _,c in ipairs(UI.scroll:GetChildren()) do
-		if c:IsA("TextLabel") or c:IsA("UIListLayout") then c:Destroy() end
-	end
-	local layout=Instance.new("UIListLayout")
-	layout.Padding=UDim.new(0,4)
-	layout.SortOrder=Enum.SortOrder.LayoutOrder
-	layout.Parent=UI.scroll
-	layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-		if uiAlive() then UI.scroll.CanvasSize=UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+10) end
-	end)
-
-	local f=UI.filterText
-	local shown=0
-	local start=math.max(1,#S.renderQ-C.RenderQueueMax+1)
-	for i=start,#S.renderQ do
-		local e=S.renderQ[i]
-		if e then
-			if f=="" or string.find(string.lower(e.text), f, 1, true) then
-				local lbl=Instance.new("TextLabel")
-				lbl.BackgroundTransparency=1
-				lbl.Size=UDim2.new(1,-10,0,0)
-				lbl.AutomaticSize=Enum.AutomaticSize.Y
-				lbl.TextWrapped=true
-				lbl.TextXAlignment=Enum.TextXAlignment.Left
-				lbl.TextYAlignment=Enum.TextYAlignment.Top
-				lbl.Font=Enum.Font.SourceSans
-				lbl.TextSize=S.fontSize
-				lbl.TextColor3=e.color or C.Colors.Text
-				lbl.Text=e.text
-				lbl.Parent=UI.scroll
-				shown += 1
-				if shown>=C.MaxRender then break end
-			end
-		end
-	end
-	task.defer(function()
-		if uiAlive() then UI.scroll.CanvasPosition=Vector2.new(0,1e9) end
-	end)
+    state.renderQueue[#state.renderQueue+1] = entry
+    if #state.renderQueue > Config.RenderQueueMax then table.remove(state.renderQueue,1) end
 end
 
 local function addLine(raw, cat, color)
-	local line = ("[%s] %s"):format(nowStr(), raw)
-	pushHistory(line)
-	pushRender({text=line, cat=cat, color=color})
+    local line = ("[%s] %s"):format(nowStr(), raw)
+    pushHistory(line)
+    pushRender({text=line, cat=cat, color=color})
 
-	if not uiAlive() or S.isCollapsed then return end
-	if UI.filterText~="" then UI.renderAll(); return end
+    if not uiAlive() or state.isCollapsed then return end
+    if UI.filterText ~= "" then UI.renderAll(); return end
 
-	local lbl=Instance.new("TextLabel")
-	lbl.BackgroundTransparency=1
-	lbl.Size=UDim2.new(1,-10,0,0)
-	lbl.AutomaticSize=Enum.AutomaticSize.Y
-	lbl.TextWrapped=true
-	lbl.TextXAlignment=Enum.TextXAlignment.Left
-	lbl.TextYAlignment=Enum.TextYAlignment.Top
-	lbl.Font=Enum.Font.SourceSans
-	lbl.TextSize=S.fontSize
-	lbl.TextColor3=color or C.Colors.Text
-	lbl.Text=line
-	lbl.Parent=UI.scroll
+    local lbl=Instance.new("TextLabel")
+    lbl.BackgroundTransparency=1
+    lbl.Size=UDim2.new(1,-10,0,0)
+    lbl.AutomaticSize=Enum.AutomaticSize.Y
+    lbl.TextWrapped=true
+    lbl.TextXAlignment=Enum.TextXAlignment.Left
+    lbl.TextYAlignment=Enum.TextYAlignment.Top
+    lbl.Font=Enum.Font.SourceSans
+    lbl.TextSize=state.fontSize
+    lbl.TextColor3=color or Config.Colors.Text
+    lbl.Text=line
+    lbl.Parent=UI.scroll
 
-	task.defer(function()
-		if uiAlive() then UI.scroll.CanvasPosition=Vector2.new(0,1e9) end
-	end)
+    task.defer(function()
+        if uiAlive() then UI.scroll.CanvasPosition=Vector2.new(0,1e9) end
+    end)
 end
 
-local function sys(msg) addLine("🧠 系统："..msg, "SYS", C.Colors.System) end
+local function sys(msg, sub)
+    addLine("🧠 系统："..msg, sub or "SYS", Config.Colors.System)
+end
+
+function UI.renderAll()
+    if not uiAlive() or state.isCollapsed then return end
+    for _,c in ipairs(UI.scroll:GetChildren()) do
+        if c:IsA("TextLabel") or c:IsA("UIListLayout") then c:Destroy() end
+    end
+    local layout=Instance.new("UIListLayout")
+    layout.Padding=UDim.new(0,4)
+    layout.SortOrder=Enum.SortOrder.LayoutOrder
+    layout.Parent=UI.scroll
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        if uiAlive() then UI.scroll.CanvasSize=UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+10) end
+    end)
+
+    local f = UI.filterText
+    local shown=0
+    local start=math.max(1,#state.renderQueue-Config.RenderQueueMax+1)
+    for i=start,#state.renderQueue do
+        local e=state.renderQueue[i]
+        if e then
+            if f=="" or string.find(string.lower(e.text), f, 1, true) then
+                local lbl=Instance.new("TextLabel")
+                lbl.BackgroundTransparency=1
+                lbl.Size=UDim2.new(1,-10,0,0)
+                lbl.AutomaticSize=Enum.AutomaticSize.Y
+                lbl.TextWrapped=true
+                lbl.TextXAlignment=Enum.TextXAlignment.Left
+                lbl.TextYAlignment=Enum.TextYAlignment.Top
+                lbl.Font=Enum.Font.SourceSans
+                lbl.TextSize=state.fontSize
+                lbl.TextColor3=e.color or Config.Colors.Text
+                lbl.Text=e.text
+                lbl.Parent=UI.scroll
+                shown += 1
+                if shown>=Config.MaxRender then break end
+            end
+        end
+    end
+    task.defer(function()
+        if uiAlive() then UI.scroll.CanvasPosition=Vector2.new(0,1e9) end
+    end)
+end
 
 local function setPinnedIfEnabled()
-	if not uiAlive() or not S.pinEnabled then return end
-	local pad=10
-	local w=S.width
-	local h=S.isCollapsed and C.CollapsedHeight or S.height
-	if S.pinned=="BR" then UI.main.Position=UDim2.new(1,-w-pad,1,-h-pad)
-	elseif S.pinned=="TR" then UI.main.Position=UDim2.new(1,-w-pad,0,pad)
-	elseif S.pinned=="BL" then UI.main.Position=UDim2.new(0,pad,1,-h-pad)
-	else UI.main.Position=UDim2.new(0,pad,0,pad) end
+    if not uiAlive() or not state.pinEnabled then return end
+    local pad=10
+    local w=state.width
+    local h=state.isCollapsed and Config.CollapsedHeight or state.height
+    if state.pinned=="BR" then UI.main.Position=UDim2.new(1,-w-pad,1,-h-pad)
+    elseif state.pinned=="TR" then UI.main.Position=UDim2.new(1,-w-pad,0,pad)
+    elseif state.pinned=="BL" then UI.main.Position=UDim2.new(0,pad,1,-h-pad)
+    else UI.main.Position=UDim2.new(0,pad,0,pad) end
+end
+
+local function applyCollapsed()
+    if not uiAlive() then return end
+    if state.isCollapsed then
+        tween(UI.main,0.22,{Size=UDim2.new(0,state.width,0,Config.CollapsedHeight)})
+        UI.scroll.Visible=false
+        UI.bar.Visible=false
+        UI.handle.Visible=false
+        UI.btnFold.Text="▲"
+    else
+        tween(UI.main,0.22,{Size=UDim2.new(0,state.width,0,state.height)})
+        UI.scroll.Visible=true
+        UI.bar.Visible=true
+        UI.handle.Visible=true
+        UI.btnFold.Text="▼"
+        UI.renderAll()
+    end
+    setPinnedIfEnabled()
 end
 
 local function updateInfo()
-	if not uiAlive() then return end
-	local bz, swearPct, mps, burst = computeStats()
-	local lvl,col = levelName(bz)
-	UI.info.Text = ("👥%d | %s %d%% | 🤬%d%% | ⚡%.2f/s | 💥%d | 📚%d | Detector:%s")
-		:format(#Players:GetPlayers(), lvl, bz, swearPct, mps, burst, countWords(wordsTable), detectorStatus)
-	UI.info.TextColor3 = col
+    if not uiAlive() then return end
+    local bz, swearPct, mps, burst = computeStats()
+    local lvl,col=getLevel(bz)
+    local rt=os.difftime(os.time(), state.startTime)
+    UI.info.Text = ("👥%d | %s %d%% | 🤬%d%% | ⚡%.2f/s | 💥%d | 📚%d | Detector:%s")
+        :format(#Players:GetPlayers(), lvl, bz, swearPct, mps, burst, totalWordCount, detectorStatus)
+    UI.info.TextColor3 = col
 end
 
---========================
--- Build UI（不重叠：右上按钮用 UIListLayout）
---========================
-do
-	local old=pg:FindFirstChild("ChatLoggerGUI")
-	if old then old:Destroy() end
-
-	local gui=Instance.new("ScreenGui")
-	gui.Name="ChatLoggerGUI"
-	gui.ResetOnSpawn=false
-	gui.Parent=pg
-	UI.gui=gui
-
-	local main=Instance.new("Frame")
-	main.Size=UDim2.new(0,S.width,0,S.height)
-	main.Position=UDim2.new(0,20,0,100)
-	main.BackgroundColor3=C.Colors.Bg
-	main.BackgroundTransparency=0.08
-	main.BorderSizePixel=0
-	main.ClipsDescendants=true
-	main.Active=true
-	main.Parent=gui
-	UI.main=main
-
-	local stroke=Instance.new("UIStroke")
-	stroke.Thickness=2
-	stroke.Color=C.Colors.Primary
-	stroke.Transparency=0.15
-	stroke.Parent=main
-
-	local titleBar=Instance.new("Frame")
-	titleBar.Size=UDim2.new(1,0,0,86)
-	titleBar.BackgroundColor3=C.Colors.Primary
-	titleBar.BackgroundTransparency=0.22
-	titleBar.BorderSizePixel=0
-	titleBar.Parent=main
-	UI.titleBar=titleBar
-
-	local title=Instance.new("TextLabel")
-	title.BackgroundTransparency=1
-	title.Size=UDim2.new(1,-12,0,40)
-	title.Position=UDim2.new(0,12,0,0)
-	title.TextXAlignment=Enum.TextXAlignment.Left
-	title.Font=Enum.Font.GothamBold
-	title.TextSize=S.fontSize+3
-	title.TextColor3=Color3.new(1,1,1)
-	title.Text="💀 贴吧狂暴记录器 "..C.Version
-	title.Parent=titleBar
-
-	local right=Instance.new("Frame")
-	right.BackgroundTransparency=1
-	right.Size=UDim2.new(0,220,0,40)
-	right.Position=UDim2.new(1,-230,0,0)
-	right.Parent=titleBar
-	local rl=Instance.new("UIListLayout")
-	rl.FillDirection=Enum.FillDirection.Horizontal
-	rl.HorizontalAlignment=Enum.HorizontalAlignment.Right
-	rl.VerticalAlignment=Enum.VerticalAlignment.Center
-	rl.Padding=UDim.new(0,6)
-	rl.Parent=right
-
-	local function topBtn(text,bg,tc)
-		local b=Instance.new("TextButton")
-		b.Size=UDim2.new(0,40,0,40)
-		b.BackgroundColor3=bg
-		b.BackgroundTransparency=0.2
-		b.BorderSizePixel=0
-		b.Text=text
-		b.TextSize=20
-		b.Font=Enum.Font.GothamBold
-		b.TextColor3=tc or Color3.new(0,0,0)
-		b.Parent=right
-		return b
-	end
-
-	local btnHide = topBtn("✖", Color3.fromRGB(255,255,255), Color3.new(0,0,0))
-	local btnFold = topBtn("▼", Color3.fromRGB(255,255,255), Color3.new(0,0,0))
-	local btnPin  = topBtn("📌", Color3.fromRGB(255,255,255), Color3.new(0,0,0))
-	local btnTest = topBtn("🧪", Color3.fromRGB(255,255,255), Color3.new(0,0,0))
-
-	local search=Instance.new("TextBox")
-	search.Size=UDim2.new(0,220,0,28)
-	search.Position=UDim2.new(1,-470,0,6)
-	search.BackgroundColor3=Color3.fromRGB(0,0,0)
-	search.BackgroundTransparency=0.35
-	search.TextColor3=Color3.new(1,1,1)
-	search.PlaceholderText="🔎 搜索过滤..."
-	search.ClearTextOnFocus=false
-	search.Font=Enum.Font.SourceSans
-	search.TextSize=14
-	search.BorderSizePixel=0
-	search.Parent=titleBar
-	UI.search=search
-
-	local scroll=Instance.new("ScrollingFrame")
-	scroll.Size=UDim2.new(1,-20,1,-210)
-	scroll.Position=UDim2.new(0,10,0,94)
-	scroll.BackgroundColor3=Color3.new(0,0,0)
-	scroll.BackgroundTransparency=0.45
-	scroll.BorderSizePixel=0
-	scroll.ScrollBarThickness=8
-	scroll.ScrollBarImageColor3=C.Colors.Secondary
-	scroll.Parent=main
-	UI.scroll=scroll
-
-	local layout=Instance.new("UIListLayout")
-	layout.Padding=UDim.new(0,4)
-	layout.SortOrder=Enum.SortOrder.LayoutOrder
-	layout.Parent=scroll
-	layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-		if uiAlive() then scroll.CanvasSize=UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+10) end
-	end)
-
-	local bar=Instance.new("Frame")
-	bar.Size=UDim2.new(1,-20,0,96)
-	bar.Position=UDim2.new(0,10,1,-132)
-	bar.BackgroundTransparency=1
-	bar.Parent=main
-
-	local grid=Instance.new("UIGridLayout")
-	grid.CellPadding=UDim2.new(0,8,0,8)
-	grid.CellSize=UDim2.new(0,(S.width-40)/5,0,36)
-	grid.Parent=bar
-
-	local function mkBtn(text,bg)
-		local b=Instance.new("TextButton")
-		b.BackgroundColor3=bg
-		b.BackgroundTransparency=0.18
-		b.BorderSizePixel=0
-		b.Text=text
-		b.TextColor3=Color3.new(1,1,1)
-		b.TextSize=S.fontSize-2
-		b.Font=Enum.Font.GothamBold
-		b.Parent=bar
-		return b
-	end
-
-	local bSave=mkBtn("💾保存", C.Colors.Success)
-	local bCopy=mkBtn("📋复制", Color3.fromRGB(120,120,120))
-	local bStats=mkBtn("📊统计", Color3.fromRGB(150,0,255))
-	local bClear=mkBtn("🗑️清空", Color3.fromRGB(255,100,0))
-	local bClose=mkBtn("⏻关闭", C.Colors.Danger)
-
-	local info=Instance.new("TextLabel")
-	info.Size=UDim2.new(1,-20,0,22)
-	info.Position=UDim2.new(0,10,1,-28)
-	info.BackgroundTransparency=1
-	info.TextXAlignment=Enum.TextXAlignment.Left
-	info.Font=Enum.Font.SourceSansBold
-	info.TextSize=S.fontSize-4
-	info.TextColor3=C.Colors.Secondary
-	info.Parent=main
-	UI.info=info
-
-	local handle=Instance.new("Frame")
-	handle.Size=UDim2.new(0,20,0,20)
-	handle.Position=UDim2.new(1,-20,1,-20)
-	handle.BackgroundColor3=C.Colors.Secondary
-	handle.BackgroundTransparency=0.45
-	handle.BorderSizePixel=0
-	handle.Parent=main
-	UI.handle=handle
-
-	search:GetPropertyChangedSignal("Text"):Connect(function()
-		UI.filterText = string.lower(search.Text or "")
-		UI.renderAll()
-	end)
-
-	btnHide.MouseButton1Click:Connect(function()
-		main.Visible = not main.Visible
-	end)
-
-	btnFold.MouseButton1Click:Connect(function()
-		S.isCollapsed = not S.isCollapsed
-		if S.isCollapsed then
-			btnFold.Text="▲"
-			tween(main,0.22,{Size=UDim2.new(0,S.width,0,C.CollapsedHeight)})
-			scroll.Visible=false; bar.Visible=false; handle.Visible=false
-		else
-			btnFold.Text="▼"
-			tween(main,0.22,{Size=UDim2.new(0,S.width,0,S.height)})
-			scroll.Visible=true; bar.Visible=true; handle.Visible=true
-			UI.renderAll()
-		end
-		setPinnedIfEnabled()
-	end)
-
-	local pinCycle={"BR","TR","TL","BL"} local pi=1
-	btnPin.MouseButton1Click:Connect(function()
-		pi = pi%#pinCycle + 1
-		S.pinned = pinCycle[pi]
-		S.pinEnabled = true
-		setPinnedIfEnabled()
-		sys("📌置顶："..S.pinned.."（拖动/缩放会取消）")
-	end)
-
-	btnTest.MouseButton1Click:Connect(function()
-		sys("自测：插入 ###（必须计脏话）")
-		windowAdd(analyzeMsg("###"))
-		addLine("TestUser：###", "CHAT", C.Colors.Text)
-		updateInfo()
-	end)
-
-	bStats.MouseButton1Click:Connect(function()
-		local bz,sp,mps,burst = computeStats()
-		local lvl=select(1,levelName(bz))
-		sys(("近窗：%d%%(%s) | 脏话率=%d%% | %.2f/s | burst=%d | Detector=%s")
-			:format(bz,lvl,sp,mps,burst,detectorStatus))
-	end)
-
-	bSave.MouseButton1Click:Connect(function()
-		if writefile then
-			writefile(C.FileName, table.concat(S.history,"\n"))
-			sys("保存完成")
-		else
-			sys("环境不支持 writefile")
-		end
-	end)
-
-	bCopy.MouseButton1Click:Connect(function()
-		if setclipboard then
-			setclipboard(table.concat(S.history,"\n"))
-			sys("已复制到剪贴板")
-		else
-			sys("环境不支持 setclipboard")
-		end
-	end)
-
-	bClear.MouseButton1Click:Connect(function()
-		S.history={}; S.renderQ={}; Window.items={}
-		sys("已清空")
-		UI.renderAll(); updateInfo()
-	end)
-
-	bClose.MouseButton1Click:Connect(function()
-		gui:Destroy()
-	end)
-
-	-- drag / resize：都会取消置顶，避免“动一下就吸角”
-	local dragging=false
-	local dragOffset=Vector2.new()
-	titleBar.InputBegan:Connect(function(input)
-		if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
-			dragging=true
-			dragOffset=Vector2.new(input.Position.X-main.AbsolutePosition.X, input.Position.Y-main.AbsolutePosition.Y)
-			S.pinEnabled=false
-		end
-	end)
-	titleBar.InputEnded:Connect(function(input)
-		if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragging=false end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
-		if not dragging or not uiAlive() then return end
-		if input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch then
-			main.Position=UDim2.new(0, input.Position.X-dragOffset.X, 0, input.Position.Y-dragOffset.Y)
-		end
-	end)
-
-	local resizing=false
-	local rs=Vector2.new()
-	local rsz=Vector2.new()
-	handle.InputBegan:Connect(function(input)
-		if S.isCollapsed then return end
-		if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
-			resizing=true
-			rs=Vector2.new(input.Position.X,input.Position.Y)
-			rsz=Vector2.new(main.AbsoluteSize.X,main.AbsoluteSize.Y)
-			S.pinEnabled=false
-		end
-	end)
-	handle.InputEnded:Connect(function(input)
-		if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then resizing=false end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
-		if not resizing or S.isCollapsed or not uiAlive() then return end
-		if input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch then
-			local d=Vector2.new(input.Position.X-rs.X, input.Position.Y-rs.Y)
-			S.width = clamp(rsz.X+d.X, C.MinWidth, C.MaxWidth)
-			S.height= clamp(rsz.Y+d.Y, C.MinHeight, C.MaxHeight)
-			main.Size=UDim2.new(0,S.width,0,S.height)
-			grid.CellSize=UDim2.new(0,(S.width-40)/5,0,36)
-		end
-	end)
-
-	sys(("启动完成：Detector=%s | 字库=%d"):format(detectorStatus, countWords(wordsTable)))
-	updateInfo()
+-- ===== save/copy =====
+local function buildSave()
+    local bz, swearPct, mps, burst = computeStats()
+    local lvl = select(1,getLevel(bz))
+    local out={}
+    out[#out+1]="╔══════════════════════════════════════════════════════════════╗"
+    out[#out+1]="║ 贴吧狂暴聊天记录 "..nowStr()
+    out[#out+1]="║ 版本："..Config.Version
+    out[#out+1]="║ 玩家："..lp.Name
+    out[#out+1]=("║ Detector：%s | 字库词数：%d | UTF8丢弃：%d"):format(detectorStatus,totalWordCount,droppedWords)
+    out[#out+1]=("║ 近窗：狂暴=%d%%(%s) | 脏话率=%d%% | %.2f msg/s | burst=%d"):format(bz,lvl,swearPct,mps,burst)
+    out[#out+1]="╚══════════════════════════════════════════════════════════════╝"
+    out[#out+1]=""
+    for i=1,#state.history do out[#out+1]=state.history[i] end
+    return table.concat(out,"\n")
 end
 
---========================
--- Chat capture（3 路 + 去重）
---========================
+local function saveAsync(cb)
+    if state.isSaving then if cb then cb(false,"saving") end return end
+    state.isSaving=true
+    task.spawn(function()
+        local timeout=false
+        task.spawn(function() task.wait(Config.SaveTimeout); timeout=true end)
+        local ok, err = pcall(function()
+            local content=buildSave()
+            if writefile then
+                writefile(Config.FileName, content)
+                writefile("./"..Config.FileName, content)
+            end
+        end)
+        state.isSaving=false
+        if timeout then if cb then cb(false,"timeout") end return end
+        if cb then cb(ok, err) end
+    end)
+end
+
+-- ===== Build UI (optimized layout) =====
+local function buildUI()
+    local old=pg:FindFirstChild("ChatLoggerGUI")
+    if old then old:Destroy() end
+
+    local gui=Instance.new("ScreenGui")
+    gui.Name="ChatLoggerGUI"
+    gui.ResetOnSpawn=false
+    gui.Parent=pg
+    UI.gui=gui
+
+    local main=Instance.new("Frame")
+    main.Size=UDim2.new(0,state.width,0,state.height)
+    main.Position=UDim2.new(0,20,0,100)
+    main.BackgroundColor3=Config.Colors.Background
+    main.BackgroundTransparency=0.08
+    main.BorderSizePixel=0
+    main.ClipsDescendants=true
+    main.Active=true
+    main.Parent=gui
+    UI.main=main
+
+    local stroke=Instance.new("UIStroke")
+    stroke.Thickness=2
+    stroke.Color=Config.Colors.Primary
+    stroke.Transparency=0.15
+    stroke.Parent=main
+
+    local titleBar=Instance.new("Frame")
+    titleBar.Size=UDim2.new(1,0,0,86)
+    titleBar.BackgroundColor3=Config.Colors.Primary
+    titleBar.BackgroundTransparency=0.22
+    titleBar.BorderSizePixel=0
+    titleBar.Parent=main
+    UI.titleBar=titleBar
+
+    local title=Instance.new("TextLabel")
+    title.BackgroundTransparency=1
+    title.Size=UDim2.new(1,-12,0,40)
+    title.Position=UDim2.new(0,12,0,0)
+    title.TextXAlignment=Enum.TextXAlignment.Left
+    title.Font=Enum.Font.GothamBold
+    title.TextSize=state.fontSize+3
+    title.TextColor3=Color3.new(1,1,1)
+    title.Text="💀 贴吧狂暴记录器 "..Config.Version
+    title.Parent=titleBar
+
+    -- right buttons with layout (no overlap)
+    local right=Instance.new("Frame")
+    right.BackgroundTransparency=1
+    right.Size=UDim2.new(0, 220, 0, 40)
+    right.Position=UDim2.new(1, -230, 0, 0)
+    right.Parent=titleBar
+
+    local rl=Instance.new("UIListLayout")
+    rl.FillDirection=Enum.FillDirection.Horizontal
+    rl.HorizontalAlignment=Enum.HorizontalAlignment.Right
+    rl.VerticalAlignment=Enum.VerticalAlignment.Center
+    rl.Padding=UDim.new(0,6)
+    rl.Parent=right
+
+    local function topBtn(text,bg,tc)
+        local b=Instance.new("TextButton")
+        b.Size=UDim2.new(0,40,0,40)
+        b.BackgroundColor3=bg
+        b.BackgroundTransparency=0.2
+        b.BorderSizePixel=0
+        b.Text=text
+        b.TextSize=20
+        b.Font=Enum.Font.GothamBold
+        b.TextColor3=tc or Color3.new(0,0,0)
+        b.Parent=right
+        return b
+    end
+
+    local btnHide = topBtn("✖", Color3.fromRGB(255,255,255), Color3.new(0,0,0))
+    UI.btnFold = topBtn("▼", Color3.fromRGB(255,255,255), Color3.new(0,0,0))
+
+    local search=Instance.new("TextBox")
+    search.Size=UDim2.new(0,200,0,28)
+    search.Position=UDim2.new(1,-230-210,0,6)
+    search.BackgroundColor3=Color3.fromRGB(0,0,0)
+    search.BackgroundTransparency=0.35
+    search.TextColor3=Color3.new(1,1,1)
+    search.PlaceholderText="🔎 搜索过滤..."
+    search.PlaceholderColor3=Color3.fromRGB(200,200,200)
+    search.Text=""
+    search.ClearTextOnFocus=false
+    search.Font=Enum.Font.SourceSans
+    search.TextSize=14
+    search.BorderSizePixel=0
+    search.Parent=titleBar
+    UI.search=search
+
+    local chipRow=Instance.new("Frame")
+    chipRow.Size=UDim2.new(1,-20,0,34)
+    chipRow.Position=UDim2.new(0,10,0,46)
+    chipRow.BackgroundTransparency=1
+    chipRow.Parent=titleBar
+
+    local function capsule(x,text)
+        local b=Instance.new("TextButton")
+        b.Size=UDim2.new(0,90,0,26)
+        b.Position=UDim2.new(0,x,0,4)
+        b.BackgroundColor3=Color3.fromRGB(0,0,0)
+        b.BackgroundTransparency=0.55
+        b.BorderSizePixel=0
+        b.Text=text
+        b.TextColor3=Color3.new(1,1,1)
+        b.TextSize=13
+        b.Font=Enum.Font.GothamBold
+        b.Parent=chipRow
+        local cr=Instance.new("UICorner"); cr.CornerRadius=UDim.new(0,999); cr.Parent=b
+        return b
+    end
+    capsule(0,"💬 聊天")
+    capsule(98,"🧠 系统")
+
+    local scroll=Instance.new("ScrollingFrame")
+    scroll.Size=UDim2.new(1,-20,1,-210)
+    scroll.Position=UDim2.new(0,10,0,94)
+    scroll.BackgroundColor3=Color3.new(0,0,0)
+    scroll.BackgroundTransparency=0.45
+    scroll.BorderSizePixel=0
+    scroll.ScrollBarThickness=8
+    scroll.ScrollBarImageColor3=Config.Colors.Secondary
+    scroll.Parent=main
+    UI.scroll=scroll
+
+    local layout=Instance.new("UIListLayout")
+    layout.Padding=UDim.new(0,4)
+    layout.SortOrder=Enum.SortOrder.LayoutOrder
+    layout.Parent=scroll
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        if uiAlive() then scroll.CanvasSize=UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+10) end
+    end)
+
+    local bar=Instance.new("Frame")
+    bar.Size=UDim2.new(1,-20,0,96)
+    bar.Position=UDim2.new(0,10,1,-132)
+    bar.BackgroundTransparency=1
+    bar.Parent=main
+    UI.bar=bar
+
+    local grid=Instance.new("UIGridLayout")
+    grid.CellPadding=UDim2.new(0,8,0,8)
+    grid.CellSize=UDim2.new(0,(state.width-40)/5,0,36)
+    grid.Parent=bar
+
+    local function mkBtn(text,bg)
+        local b=Instance.new("TextButton")
+        b.BackgroundColor3=bg
+        b.BackgroundTransparency=0.18
+        b.BorderSizePixel=0
+        b.Text=text
+        b.TextColor3=Color3.new(1,1,1)
+        b.TextSize=state.fontSize-2
+        b.Font=Enum.Font.GothamBold
+        b.Parent=bar
+        return b
+    end
+
+    local bSave  = mkBtn("💾保存", Config.Colors.Success)
+    local bExport= mkBtn("📤导出", Color3.fromRGB(0,150,255))
+    local bCopy  = mkBtn("📋复制", Color3.fromRGB(120,120,120))
+    local bStats = mkBtn("📊统计", Color3.fromRGB(150,0,255))
+    local bPeople= mkBtn("👥名单", Color3.fromRGB(0,200,200))
+
+    local bFont  = mkBtn("🔤字体", Color3.fromRGB(90,90,90))
+    local bClear = mkBtn("🗑️清空", Color3.fromRGB(255,100,0))
+    local bPin   = mkBtn("📌置顶", Color3.fromRGB(200,0,200))
+    local bTest  = mkBtn("🧪自测", Color3.fromRGB(80,80,80))
+    local bClose = mkBtn("⏻关闭", Config.Colors.Danger)
+
+    local info=Instance.new("TextLabel")
+    info.Size=UDim2.new(1,-20,0,22)
+    info.Position=UDim2.new(0,10,1,-28)
+    info.BackgroundTransparency=1
+    info.TextXAlignment=Enum.TextXAlignment.Left
+    info.Font=Enum.Font.SourceSansBold
+    info.TextSize=state.fontSize-4
+    info.TextColor3=Config.Colors.Secondary
+    info.Parent=main
+    UI.info=info
+
+    local handle=Instance.new("Frame")
+    handle.Size=UDim2.new(0,20,0,20)
+    handle.Position=UDim2.new(1,-20,1,-20)
+    handle.BackgroundColor3=Config.Colors.Secondary
+    handle.BackgroundTransparency=0.45
+    handle.BorderSizePixel=0
+    handle.Parent=main
+    UI.handle=handle
+
+    -- events
+    search:GetPropertyChangedSignal("Text"):Connect(function()
+        UI.filterText = string.lower(search.Text or "")
+        UI.renderAll()
+    end)
+
+    btnHide.MouseButton1Click:Connect(function()
+        main.Visible = not main.Visible
+        btnHide.Text = main.Visible and "✖" or "◉"
+    end)
+
+    UI.btnFold.MouseButton1Click:Connect(function()
+        state.isCollapsed = not state.isCollapsed
+        applyCollapsed()
+    end)
+
+    bTest.MouseButton1Click:Connect(function()
+        sys("自测：插入 ###（必须计脏话）","SYS_HINT")
+        addLine("TestUser：###", "CHAT", Config.Colors.Text)
+        windowAdd(analyzeMsg("###"))
+        updateInfo()
+    end)
+
+    bStats.MouseButton1Click:Connect(function()
+        local bz,swearPct,mps,burst = computeStats()
+        local lvl=select(1,getLevel(bz))
+        sys(("近窗：%d%%(%s) | 脏话率=%d%% | %.2f/s | burst=%d | Detector=%s")
+            :format(bz,lvl,swearPct,mps,burst,detectorStatus), "SYS_STATS")
+    end)
+
+    bSave.MouseButton1Click:Connect(function()
+        saveAsync(function(ok,err)
+            sys(ok and "保存成功" or ("保存失败："..tostring(err)), "SYS_SAVE")
+        end)
+    end)
+
+    bExport.MouseButton1Click:Connect(function()
+        saveAsync(function(ok,err)
+            sys(ok and "导出成功（写入文件）" or ("导出失败："..tostring(err)), "SYS_EXPORT")
+        end)
+    end)
+
+    bCopy.MouseButton1Click:Connect(function()
+        local all = table.concat(state.history,"\n")
+        if setclipboard then
+            pcall(function() setclipboard(all) end)
+            sys(("已复制（%d条）"):format(#state.history),"SYS_EXPORT")
+        else
+            sys("环境不支持 setclipboard","SYS_EXPORT")
+        end
+    end)
+
+    bFont.MouseButton1Click:Connect(function()
+        local sizes={14,18,22,26}
+        local idx=1
+        for i,s in ipairs(sizes) do if state.fontSize==s then idx=i break end end
+        state.fontSize = sizes[idx%#sizes+1]
+        sys("字体大小="..tostring(state.fontSize),"SYS_HINT")
+        UI.renderAll(); updateInfo()
+    end)
+
+    bClear.MouseButton1Click:Connect(function()
+        state.history={}
+        state.renderQueue={}
+        Window.items={}
+        sys("已清空","SYS_HINT")
+        UI.renderAll(); updateInfo()
+    end)
+
+    local pinCycle={"BR","TR","TL","BL"} local pi=1
+    bPin.MouseButton1Click:Connect(function()
+        pi = pi%#pinCycle + 1
+        state.pinned = pinCycle[pi]
+        state.pinEnabled = true
+        setPinnedIfEnabled()
+        sys("📌置顶："..state.pinned.."（拖动/缩放会取消）","SYS_HINT")
+    end)
+
+    bClose.MouseButton1Click:Connect(function()
+        gui:Destroy()
+    end)
+
+    -- drag cancel pin
+    local dragging=false
+    local dragOffset=Vector2.new()
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            dragging=true
+            dragOffset=Vector2.new(input.Position.X-main.AbsolutePosition.X, input.Position.Y-main.AbsolutePosition.Y)
+            state.pinEnabled=false
+        end
+    end)
+    titleBar.InputEnded:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragging=false end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging or not uiAlive() then return end
+        if input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch then
+            main.Position=UDim2.new(0, input.Position.X-dragOffset.X, 0, input.Position.Y-dragOffset.Y)
+        end
+    end)
+
+    -- resize cancel pin
+    local resizing=false
+    local rs=Vector2.new()
+    local rsz=Vector2.new()
+    handle.InputBegan:Connect(function(input)
+        if state.isCollapsed then return end
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            resizing=true
+            rs=Vector2.new(input.Position.X,input.Position.Y)
+            rsz=Vector2.new(main.AbsoluteSize.X,main.AbsoluteSize.Y)
+            state.pinEnabled=false
+        end
+    end)
+    handle.InputEnded:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then resizing=false end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not resizing or state.isCollapsed or not uiAlive() then return end
+        if input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch then
+            local d=Vector2.new(input.Position.X-rs.X, input.Position.Y-rs.Y)
+            state.width = clamp(rsz.X+d.X, Config.MinWidth, Config.MaxWidth)
+            state.height= clamp(rsz.Y+d.Y, Config.MinHeight, Config.MaxHeight)
+            main.Size=UDim2.new(0,state.width,0,state.height)
+            grid.CellSize=UDim2.new(0,(state.width-40)/5,0,36)
+        end
+    end)
+
+    -- init
+    sys(("启动完成：Detector=%s | 字库=%d | UTF8丢弃=%d"):format(detectorStatus,totalWordCount,droppedWords),"SYS_START")
+    updateInfo()
+    UI.renderAll()
+end
+
+buildUI()
+
+-- ===== Chat hooks =====
 local Dedup={}
 local function passDedup(speaker,text)
-	local t=os.clock()
-	local k=tostring(speaker).."│"..tostring(text)
-	local last=Dedup[k]
-	Dedup[k]=t
-	return (not last) or ((t-last)>0.35)
+    local t=os.clock()
+    local k=tostring(speaker).."│"..tostring(text)
+    local last=Dedup[k]
+    Dedup[k]=t
+    return (not last) or ((t-last)>0.35)
 end
 
 local function onCaptured(speaker,text)
-	if type(text)~="string" or text=="" then return end
-	if not passDedup(speaker,text) then return end
-	local raw = (speaker==lp.Name) and ("我："..text) or (tostring(speaker).."："..text)
-	local col = (S.muted[tostring(speaker)]==true) and C.Colors.Muted or C.Colors.Text
-	addLine(raw, "CHAT", col)
-	windowAdd(analyzeMsg(text))
-	updateInfo()
+    if type(text)~="string" or text=="" then return end
+    if not passDedup(speaker,text) then return end
+    local muted = state.mutedPlayers[speaker]==true
+    addLine((speaker==lp.Name) and ("我："..text) or (tostring(speaker).."："..text), "CHAT", muted and Config.Colors.Muted or Config.Colors.Text)
+    windowAdd(analyzeMsg(text))
 end
 
 local function hookTCS()
-	if not TextChatService then return end
-	local ok, ver = pcall(function() return TextChatService.ChatVersion end)
-	if not ok or ver ~= Enum.ChatVersion.TextChatService then return end
-	if typeof(TextChatService.MessageReceived) ~= "RBXScriptSignal" then return end
-	TextChatService.MessageReceived:Connect(function(msg)
-		local speaker="未知"
-		local text=""
-		pcall(function()
-			text = msg.Text or ""
-			if msg.TextSource and msg.TextSource.UserId then
-				local p=Players:GetPlayerByUserId(msg.TextSource.UserId)
-				if p then speaker=p.Name end
-			end
-		end)
-		onCaptured(speaker,text)
-	end)
-	sys("聊天源：TCS.MessageReceived ✅")
+    if not TextChatService then return false end
+    local ok, ver = pcall(function() return TextChatService.ChatVersion end)
+    if not ok or ver ~= Enum.ChatVersion.TextChatService then return false end
+    if typeof(TextChatService.MessageReceived) ~= "RBXScriptSignal" then return false end
+
+    TextChatService.MessageReceived:Connect(function(msg)
+        local speaker="未知"
+        local text=""
+        pcall(function()
+            text = msg.Text or ""
+            if msg.TextSource and msg.TextSource.UserId then
+                local p=Players:GetPlayerByUserId(msg.TextSource.UserId)
+                if p then speaker=p.Name end
+            end
+        end)
+        onCaptured(speaker,text)
+    end)
+    sys("聊天源：TCS.MessageReceived ✅","SYS_CHATFLOW")
+    return true
 end
 
 local function hookDefault()
-	local ev=ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-	if not ev then return end
-	local r=ev:FindFirstChild("OnMessageDoneFiltering")
-	if not r or not r:IsA("RemoteEvent") then return end
-	r.OnClientEvent:Connect(function(md)
-		local speaker=(type(md)=="table" and (md.FromSpeaker or md.FromSpeakerName)) or "未知"
-		local text=(type(md)=="table" and (md.Message or md.MessageText)) or ""
-		onCaptured(speaker, tostring(text or ""))
-	end)
-	sys("聊天源：DefaultChatEvents ✅")
+    local ev=ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+    if not ev then return false end
+    local r=ev:FindFirstChild("OnMessageDoneFiltering")
+    if not r or not r:IsA("RemoteEvent") then return false end
+
+    r.OnClientEvent:Connect(function(md)
+        local speaker=(type(md)=="table" and (md.FromSpeaker or md.FromSpeakerName)) or "未知"
+        local text=(type(md)=="table" and (md.Message or md.MessageText)) or ""
+        onCaptured(speaker, tostring(text or ""))
+    end)
+    sys("聊天源：DefaultChatEvents ✅","SYS_CHATFLOW")
+    return true
 end
 
 local function hookChatted()
-	local function bind(p)
-		p.Chatted:Connect(function(msg)
-			onCaptured(p.Name, msg)
-		end)
-	end
-	for _,p in ipairs(Players:GetPlayers()) do bind(p) end
-	Players.PlayerAdded:Connect(bind)
-	sys("聊天源：Player.Chatted ✅")
+    local function bind(p)
+        p.Chatted:Connect(function(msg)
+            onCaptured(p.Name, msg)
+        end)
+    end
+    for _,p in ipairs(Players:GetPlayers()) do bind(p) end
+    Players.PlayerAdded:Connect(bind)
+    sys("聊天源：Player.Chatted ✅","SYS_CHATFLOW")
+    return true
 end
 
 hookTCS()
 hookDefault()
 hookChatted()
 
-Players.PlayerAdded:Connect(function(p) sys(p.Name.." 加入了游戏") end)
-Players.PlayerRemoving:Connect(function(p) sys(p.Name.." 离开了游戏") end)
+Players.PlayerAdded:Connect(function(p) sys(p.Name.." 加入了游戏","SYS_JOINLEAVE") end)
+Players.PlayerRemoving:Connect(function(p) sys(p.Name.." 离开了游戏","SYS_JOINLEAVE") end)
 
 -- ticker
 do
-	local acc=0
-	local interval=1/C.StatsHz
-	RunService.Heartbeat:Connect(function(dt)
-		acc += dt
-		if acc>=interval then acc=0; updateInfo() end
-	end)
+    local interval=1/Config.StatsUpdateHz
+    local acc=0
+    RunService.Heartbeat:Connect(function(dt)
+        acc += dt
+        if acc>=interval then acc=0; updateInfo() end
+    end)
 end
+
+-- autosave
+task.spawn(function()
+    while true do
+        task.wait(Config.AutoSaveInterval)
+        if #state.history>0 and not state.isSaving then
+            saveAsync(function(ok)
+                if ok then sys("自动保存完成","SYS_SAVE") end
+            end)
+        end
+    end
+end)
