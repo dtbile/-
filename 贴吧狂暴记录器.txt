@@ -23,8 +23,8 @@ local pg = lp:WaitForChild("PlayerGui")
 --========================
 -- 你可选：Detector/字库（不填也能跑）
 --========================
-local DETECTOR_URL    = "" -- 你的 Detector.lua raw（return Detector），不填就纯本地规则
-local WORDS_TABLE_URL = "" -- 你的 words.lua raw（return table），不填就用内置 fallback
+local DETECTOR_URL    = "https://raw.githubusercontent.com/dtbile/-/main/检测引擎.txt" -- 你的 Detector.lua raw（return Detector），不填就纯本地规则
+local WORDS_TABLE_URL = "https://raw.githubusercontent.com/dtbile/-/refs/heads/main/words.lua" -- 你的 words.lua raw（return table），不填就用内置 fallback
 
 --========================
 -- Config
