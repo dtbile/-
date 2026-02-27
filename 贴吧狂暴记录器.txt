@@ -1,4 +1,4 @@
--- 贴吧狂暴记录器 v1.0.6 (Full Fix) + 可选 Detector
+-- 贴吧狂暴记录器 v1.2.0 (Detector Engine) + 可选 Detector
 -- 特别修复：
 -- 1) 彻底解决“复制过长/被截断 → Line 1 Incomplete statement”：
 --    请把本文件上传到 GitHub，然后用下面“Loader 一键启动”加载。
@@ -32,7 +32,7 @@ local WORDS_TABLE_URL = "https://raw.githubusercontent.com/dtbile/-/main/words.l
 
 -- ===== Config =====
 local Config = {
-    Version = "v1.0.6",
+    Version = "v1.2.0",
     FileName = "贴吧聊天记录.txt",
 
     MaxHistory = 4000,
@@ -56,6 +56,9 @@ local Config = {
     WindowSeconds = 180,
     WindowMaxMessages = 200,
     BurstSeconds = 4,
+    SearchHideWidth = 620,
+    DedupTTL = 8,
+    CornerRadius = 14,
 
     Colors = {
         Primary   = Color3.fromRGB(255, 45, 85),
@@ -107,6 +110,13 @@ local function tween(obj, t, props)
     TweenService:Create(obj, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
 end
 
+local function makeRound(inst, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius or Config.CornerRadius)
+    c.Parent = inst
+    return c
+end
+
 local function safeLoadFromUrl(url)
     if not url or url=="" then return nil, "empty url" end
     local ok, src = pcall(function() return game:HttpGet(url) end)
@@ -126,32 +136,33 @@ local function sanitizeUtf8(s)
     local i, n = 1, #s
     while i <= n do
         local b = s:byte(i)
-        if b < 0x80 then
+        if b and b < 0x80 then
             out[#out+1] = string.char(b)
             i += 1
         else
-            local len
-            if b >= 0xC2 and b <= 0xDF then len = 2
-            elseif b >= 0xE0 and b <= 0xEF then len = 3
-            elseif b >= 0xF0 and b <= 0xF4 then len = 4
-            else
+            local len = nil
+            if b and b >= 0xC2 and b <= 0xDF then len = 2
+            elseif b and b >= 0xE0 and b <= 0xEF then len = 3
+            elseif b and b >= 0xF0 and b <= 0xF4 then len = 4 end
+
+            if not len then
                 i += 1
-                goto continue
-            end
-            if i + len - 1 > n then break end
-            local ok = true
-            for j=1,len-1 do
-                local bb = s:byte(i+j)
-                if not bb or bb < 0x80 or bb > 0xBF then ok=false break end
-            end
-            if ok then
-                out[#out+1] = s:sub(i, i+len-1)
-                i += len
+            elseif i + len - 1 > n then
+                break
             else
-                i += 1
+                local ok = true
+                for j=1,len-1 do
+                    local bb = s:byte(i+j)
+                    if not bb or bb < 0x80 or bb > 0xBF then ok=false break end
+                end
+                if ok then
+                    out[#out+1] = s:sub(i, i+len-1)
+                    i += len
+                else
+                    i += 1
+                end
             end
         end
-        ::continue::
     end
     return table.concat(out)
 end
@@ -255,6 +266,7 @@ local state = {
     fontSize = Config.FontSize,
     width = Config.DefaultWidth,
     height = Config.DefaultHeight,
+    capturePaused = false,
 }
 
 -- ===== Window buffer =====
@@ -361,8 +373,84 @@ local function getLevel(v)
 end
 
 -- ===== UI =====
-local UI = {filterText=""}
+local UI = {filterText="", panelPeople=nil, peopleList=nil, peopleSearch=nil}
 local function uiAlive() return UI.gui and UI.main and UI.main.Parent ~= nil end
+
+local sys -- forward declare，避免名单回调闭包提前引用为空
+
+local function categoryAllowed(cat)
+    if cat == "CHAT" then return CategoryFilter.showCHAT end
+    if not CategoryFilter.showSYSTEM then return false end
+    return CategoryFilter[cat] ~= false
+end
+
+local function shouldShowEntry(e)
+    if not e then return false end
+    if not categoryAllowed(e.cat) then return false end
+    if UI.filterText == "" then return true end
+    return string.find(string.lower(e.text), UI.filterText, 1, true) ~= nil
+end
+
+local function rebuildPeopleList()
+    if not uiAlive() or not UI.peopleList then return end
+    UI.peopleList:ClearAllChildren()
+
+    local layout=Instance.new("UIListLayout")
+    layout.Padding=UDim.new(0,6)
+    layout.SortOrder=Enum.SortOrder.LayoutOrder
+    layout.Parent=UI.peopleList
+
+    local kw = ""
+    if UI.peopleSearch and type(UI.peopleSearch.Text)=="string" then
+        kw = string.lower(UI.peopleSearch.Text)
+    end
+
+    local names = {}
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p ~= lp then
+            if kw=="" or string.find(string.lower(p.Name), kw, 1, true) then
+                names[#names+1]=p.Name
+            end
+        end
+    end
+    table.sort(names)
+
+    if #names == 0 then
+        local tip=Instance.new("TextLabel")
+        tip.Size=UDim2.new(1,-10,0,28)
+        tip.BackgroundTransparency=1
+        tip.Text=(kw=="" and "暂无其他玩家" or "没有匹配玩家")
+        tip.TextColor3=Config.Colors.Dim
+        tip.Font=Enum.Font.Gotham
+        tip.TextSize=13
+        tip.Parent=UI.peopleList
+        return
+    end
+
+    for i=1,#names do
+        local name=names[i]
+        local muted = state.mutedPlayers[name]==true
+        local b=Instance.new("TextButton")
+        b.Size=UDim2.new(1,-10,0,28)
+        b.BorderSizePixel=0
+        b.BackgroundTransparency=0.12
+        b.BackgroundColor3 = muted and Config.Colors.Danger or Config.Colors.Secondary
+        b.TextColor3 = Color3.new(0,0,0)
+        b.Font=Enum.Font.GothamBold
+        b.TextSize=13
+        b.Text=(muted and "🔇 " or "🔊 ")..name
+        b.Parent=UI.peopleList
+        makeRound(b, 8)
+        b.MouseButton1Click:Connect(function()
+            state.mutedPlayers[name] = not (state.mutedPlayers[name] == true)
+            if sys then
+                sys((state.mutedPlayers[name] and "🔇 已静音：" or "🔊 已取消静音：")..name, "SYS_HINT")
+            end
+            rebuildPeopleList()
+            UI.renderAll()
+        end)
+    end
+end
 
 local function pushHistory(line)
     state.history[#state.history+1] = line
@@ -380,7 +468,10 @@ local function addLine(raw, cat, color)
     pushRender({text=line, cat=cat, color=color})
 
     if not uiAlive() or state.isCollapsed then return end
-    if UI.filterText ~= "" then UI.renderAll(); return end
+    if not shouldShowEntry({text=line, cat=cat}) then
+        if UI.filterText ~= "" or not categoryAllowed(cat) then UI.renderAll() end
+        return
+    end
 
     local lbl=Instance.new("TextLabel")
     lbl.BackgroundTransparency=1
@@ -400,7 +491,7 @@ local function addLine(raw, cat, color)
     end)
 end
 
-local function sys(msg, sub)
+sys = function(msg, sub)
     addLine("🧠 系统："..msg, sub or "SYS", Config.Colors.System)
 end
 
@@ -417,13 +508,12 @@ function UI.renderAll()
         if uiAlive() then UI.scroll.CanvasSize=UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+10) end
     end)
 
-    local f = UI.filterText
     local shown=0
     local start=math.max(1,#state.renderQueue-Config.RenderQueueMax+1)
     for i=start,#state.renderQueue do
         local e=state.renderQueue[i]
         if e then
-            if f=="" or string.find(string.lower(e.text), f, 1, true) then
+            if shouldShowEntry(e) then
                 local lbl=Instance.new("TextLabel")
                 lbl.BackgroundTransparency=1
                 lbl.Size=UDim2.new(1,-10,0,0)
@@ -465,6 +555,7 @@ local function applyCollapsed()
         UI.bar.Visible=false
         UI.handle.Visible=false
         UI.btnFold.Text="▲"
+        if UI.panelPeople then UI.panelPeople.Visible=false end
     else
         tween(UI.main,0.22,{Size=UDim2.new(0,state.width,0,state.height)})
         UI.scroll.Visible=true
@@ -481,8 +572,8 @@ local function updateInfo()
     local bz, swearPct, mps, burst = computeStats()
     local lvl,col=getLevel(bz)
     local rt=os.difftime(os.time(), state.startTime)
-    UI.info.Text = ("👥%d | %s %d%% | 🤬%d%% | ⚡%.2f/s | 💥%d | 📚%d | Detector:%s")
-        :format(#Players:GetPlayers(), lvl, bz, swearPct, mps, burst, totalWordCount, detectorStatus)
+    UI.info.Text = ("👥%d | %s %d%% | 🤬%d%% | ⚡%.2f/s | 💥%d | 📚%d | Detector:%s | %s")
+        :format(#Players:GetPlayers(), lvl, bz, swearPct, mps, burst, totalWordCount, detectorStatus, state.capturePaused and "⏸暂停" or "▶记录")
     UI.info.TextColor3 = col
 end
 
@@ -542,6 +633,7 @@ local function buildUI()
     main.ClipsDescendants=true
     main.Active=true
     main.Parent=gui
+    makeRound(main, Config.CornerRadius)
     UI.main=main
 
     local stroke=Instance.new("UIStroke")
@@ -556,6 +648,7 @@ local function buildUI()
     titleBar.BackgroundTransparency=0.22
     titleBar.BorderSizePixel=0
     titleBar.Parent=main
+    makeRound(titleBar, Config.CornerRadius-2)
     UI.titleBar=titleBar
 
     local title=Instance.new("TextLabel")
@@ -594,6 +687,7 @@ local function buildUI()
         b.Font=Enum.Font.GothamBold
         b.TextColor3=tc or Color3.new(0,0,0)
         b.Parent=right
+        makeRound(b, 12)
         return b
     end
 
@@ -614,6 +708,7 @@ local function buildUI()
     search.TextSize=14
     search.BorderSizePixel=0
     search.Parent=titleBar
+    makeRound(search, 10)
     UI.search=search
 
     local chipRow=Instance.new("Frame")
@@ -637,8 +732,25 @@ local function buildUI()
         local cr=Instance.new("UICorner"); cr.CornerRadius=UDim.new(0,999); cr.Parent=b
         return b
     end
-    capsule(0,"💬 聊天")
-    capsule(98,"🧠 系统")
+    local chipChat = capsule(0,"💬 聊天")
+    local chipSys = capsule(98,"🧠 系统")
+
+    local function refreshChips()
+        chipChat.BackgroundTransparency = CategoryFilter.showCHAT and 0.25 or 0.7
+        chipSys.BackgroundTransparency = CategoryFilter.showSYSTEM and 0.25 or 0.7
+    end
+    refreshChips()
+
+    chipChat.MouseButton1Click:Connect(function()
+        CategoryFilter.showCHAT = not CategoryFilter.showCHAT
+        refreshChips()
+        UI.renderAll()
+    end)
+    chipSys.MouseButton1Click:Connect(function()
+        CategoryFilter.showSYSTEM = not CategoryFilter.showSYSTEM
+        refreshChips()
+        UI.renderAll()
+    end)
 
     local scroll=Instance.new("ScrollingFrame")
     scroll.Size=UDim2.new(1,-20,1,-210)
@@ -649,6 +761,7 @@ local function buildUI()
     scroll.ScrollBarThickness=8
     scroll.ScrollBarImageColor3=Config.Colors.Secondary
     scroll.Parent=main
+    makeRound(scroll, 12)
     UI.scroll=scroll
 
     local layout=Instance.new("UIListLayout")
@@ -660,27 +773,33 @@ local function buildUI()
     end)
 
     local bar=Instance.new("Frame")
-    bar.Size=UDim2.new(1,-20,0,96)
-    bar.Position=UDim2.new(0,10,1,-132)
+    bar.Size=UDim2.new(1,-20,0,104)
+    bar.Position=UDim2.new(0,10,1,-140)
     bar.BackgroundTransparency=1
     bar.Parent=main
     UI.bar=bar
 
+    local barPad=Instance.new("UIPadding")
+    barPad.PaddingLeft=UDim.new(0,2)
+    barPad.PaddingTop=UDim.new(0,2)
+    barPad.Parent=bar
+
     local grid=Instance.new("UIGridLayout")
     grid.CellPadding=UDim2.new(0,8,0,8)
-    grid.CellSize=UDim2.new(0,(state.width-40)/5,0,36)
+    grid.CellSize=UDim2.new(0,(state.width-52)/5,0,42)
     grid.Parent=bar
 
     local function mkBtn(text,bg)
         local b=Instance.new("TextButton")
         b.BackgroundColor3=bg
-        b.BackgroundTransparency=0.18
+        b.BackgroundTransparency=0.12
         b.BorderSizePixel=0
         b.Text=text
         b.TextColor3=Color3.new(1,1,1)
         b.TextSize=state.fontSize-2
         b.Font=Enum.Font.GothamBold
         b.Parent=bar
+        makeRound(b, 10)
         return b
     end
 
@@ -693,18 +812,20 @@ local function buildUI()
     local bFont  = mkBtn("🔤字体", Color3.fromRGB(90,90,90))
     local bClear = mkBtn("🗑️清空", Color3.fromRGB(255,100,0))
     local bPin   = mkBtn("📌置顶", Color3.fromRGB(200,0,200))
-    local bTest  = mkBtn("🧪自测", Color3.fromRGB(80,80,80))
+    local bPause = mkBtn("⏸记录", Color3.fromRGB(80,80,80))
     local bClose = mkBtn("⏻关闭", Config.Colors.Danger)
 
     local info=Instance.new("TextLabel")
     info.Size=UDim2.new(1,-20,0,22)
     info.Position=UDim2.new(0,10,1,-28)
-    info.BackgroundTransparency=1
+    info.BackgroundTransparency=0.2
+    info.BackgroundColor3=Color3.fromRGB(0,0,0)
     info.TextXAlignment=Enum.TextXAlignment.Left
     info.Font=Enum.Font.SourceSansBold
     info.TextSize=state.fontSize-4
     info.TextColor3=Config.Colors.Secondary
     info.Parent=main
+    makeRound(info, 8)
     UI.info=info
 
     local handle=Instance.new("Frame")
@@ -714,13 +835,121 @@ local function buildUI()
     handle.BackgroundTransparency=0.45
     handle.BorderSizePixel=0
     handle.Parent=main
+    makeRound(handle, 8)
     UI.handle=handle
+
+    local panelPeople=Instance.new("Frame")
+    panelPeople.Size=UDim2.new(0,260,0,300)
+    panelPeople.Position=UDim2.new(1,-240,0,94)
+    panelPeople.BackgroundColor3=Config.Colors.Panel
+    panelPeople.BackgroundTransparency=0.1
+    panelPeople.BorderSizePixel=0
+    panelPeople.Visible=false
+    panelPeople.Parent=main
+    makeRound(panelPeople, 12)
+    UI.panelPeople=panelPeople
+
+    local pplTitle=Instance.new("TextLabel")
+    pplTitle.Size=UDim2.new(1,0,0,30)
+    pplTitle.BackgroundColor3=Color3.fromRGB(0,200,200)
+    pplTitle.BackgroundTransparency=0.25
+    pplTitle.BorderSizePixel=0
+    pplTitle.Font=Enum.Font.GothamBold
+    pplTitle.TextSize=13
+    pplTitle.TextColor3=Color3.new(0,0,0)
+    pplTitle.Text="👥 名单（点名静音）"
+    pplTitle.Parent=panelPeople
+    makeRound(pplTitle, 10)
+
+    local pplToolbar=Instance.new("Frame")
+    pplToolbar.Size=UDim2.new(1,-10,0,54)
+    pplToolbar.Position=UDim2.new(0,5,0,34)
+    pplToolbar.BackgroundTransparency=1
+    pplToolbar.Parent=panelPeople
+
+    local pplSearch=Instance.new("TextBox")
+    pplSearch.Size=UDim2.new(1,0,0,24)
+    pplSearch.Position=UDim2.new(0,0,0,0)
+    pplSearch.BackgroundColor3=Color3.fromRGB(0,0,0)
+    pplSearch.BackgroundTransparency=0.3
+    pplSearch.TextColor3=Color3.new(1,1,1)
+    pplSearch.PlaceholderText="搜索玩家名..."
+    pplSearch.Text=""
+    pplSearch.ClearTextOnFocus=false
+    pplSearch.Font=Enum.Font.SourceSans
+    pplSearch.TextSize=14
+    pplSearch.BorderSizePixel=0
+    pplSearch.Parent=pplToolbar
+    makeRound(pplSearch, 8)
+    UI.peopleSearch=pplSearch
+
+    local btnMuteAll=Instance.new("TextButton")
+    btnMuteAll.Size=UDim2.new(0.49,0,0,24)
+    btnMuteAll.Position=UDim2.new(0,0,0,28)
+    btnMuteAll.BackgroundColor3=Config.Colors.Danger
+    btnMuteAll.BackgroundTransparency=0.15
+    btnMuteAll.Text="全静音"
+    btnMuteAll.TextColor3=Color3.new(1,1,1)
+    btnMuteAll.Font=Enum.Font.GothamBold
+    btnMuteAll.TextSize=12
+    btnMuteAll.BorderSizePixel=0
+    btnMuteAll.Parent=pplToolbar
+    makeRound(btnMuteAll, 8)
+
+    local btnUnmuteAll=Instance.new("TextButton")
+    btnUnmuteAll.Size=UDim2.new(0.49,0,0,24)
+    btnUnmuteAll.Position=UDim2.new(0.51,0,0,28)
+    btnUnmuteAll.BackgroundColor3=Config.Colors.Secondary
+    btnUnmuteAll.BackgroundTransparency=0.15
+    btnUnmuteAll.Text="全取消"
+    btnUnmuteAll.TextColor3=Color3.new(0,0,0)
+    btnUnmuteAll.Font=Enum.Font.GothamBold
+    btnUnmuteAll.TextSize=12
+    btnUnmuteAll.BorderSizePixel=0
+    btnUnmuteAll.Parent=pplToolbar
+    makeRound(btnUnmuteAll, 8)
+
+    local pplList=Instance.new("ScrollingFrame")
+    pplList.Size=UDim2.new(1,-10,1,-94)
+    pplList.Position=UDim2.new(0,5,0,90)
+    pplList.BackgroundTransparency=1
+    pplList.BorderSizePixel=0
+    pplList.ScrollBarThickness=6
+    pplList.CanvasSize=UDim2.new(0,0,0,0)
+    pplList.AutomaticCanvasSize=Enum.AutomaticSize.Y
+    pplList.Parent=panelPeople
+    makeRound(pplList, 8)
+    UI.peopleList=pplList
 
     -- events
     search:GetPropertyChangedSignal("Text"):Connect(function()
         UI.filterText = string.lower(search.Text or "")
         UI.renderAll()
     end)
+
+    if UI.peopleSearch then
+        UI.peopleSearch:GetPropertyChangedSignal("Text"):Connect(function()
+            if UI.panelPeople and UI.panelPeople.Visible then rebuildPeopleList() end
+        end)
+    end
+
+    if btnMuteAll then
+        btnMuteAll.MouseButton1Click:Connect(function()
+            for _,p in ipairs(Players:GetPlayers()) do
+                if p ~= lp then state.mutedPlayers[p.Name] = true end
+            end
+            sys("🔇 已全体静音", "SYS_HINT")
+            rebuildPeopleList(); UI.renderAll()
+        end)
+    end
+
+    if btnUnmuteAll then
+        btnUnmuteAll.MouseButton1Click:Connect(function()
+            state.mutedPlayers = {}
+            sys("🔊 已取消全体静音", "SYS_HINT")
+            rebuildPeopleList(); UI.renderAll()
+        end)
+    end
 
     btnHide.MouseButton1Click:Connect(function()
         main.Visible = not main.Visible
@@ -732,10 +961,11 @@ local function buildUI()
         applyCollapsed()
     end)
 
-    bTest.MouseButton1Click:Connect(function()
-        sys("自测：插入 ###（必须计脏话）","SYS_HINT")
-        addLine("TestUser：###", "CHAT", Config.Colors.Text)
-        windowAdd(analyzeMsg("###"))
+    bPause.MouseButton1Click:Connect(function()
+        state.capturePaused = not state.capturePaused
+        bPause.Text = state.capturePaused and "▶继续" or "⏸记录"
+        bPause.BackgroundColor3 = state.capturePaused and Color3.fromRGB(120,120,120) or Color3.fromRGB(80,80,80)
+        sys(state.capturePaused and "已暂停聊天抓取（仅停止新增聊天入库）" or "已恢复聊天抓取", "SYS_HINT")
         updateInfo()
     end)
 
@@ -766,6 +996,11 @@ local function buildUI()
         else
             sys("环境不支持 setclipboard","SYS_EXPORT")
         end
+    end)
+    bPeople.MouseButton1Click:Connect(function()
+        if not UI.panelPeople then return end
+        UI.panelPeople.Visible = not UI.panelPeople.Visible
+        if UI.panelPeople.Visible then rebuildPeopleList() end
     end)
 
     bFont.MouseButton1Click:Connect(function()
@@ -841,12 +1076,25 @@ local function buildUI()
             state.width = clamp(rsz.X+d.X, Config.MinWidth, Config.MaxWidth)
             state.height= clamp(rsz.Y+d.Y, Config.MinHeight, Config.MaxHeight)
             main.Size=UDim2.new(0,state.width,0,state.height)
-            grid.CellSize=UDim2.new(0,(state.width-40)/5,0,36)
+            grid.CellSize=UDim2.new(0,(state.width-52)/5,0,42)
+        end
+    end)
+
+    RunService.Heartbeat:Connect(function()
+        if not uiAlive() then return end
+        if UI.search then
+            local show = (UI.main.AbsoluteSize.X >= Config.SearchHideWidth) and (not state.isCollapsed)
+            UI.search.Visible = show
         end
     end)
 
     -- init
     sys(("启动完成：Detector=%s | 字库=%d | UTF8丢弃=%d"):format(detectorStatus,totalWordCount,droppedWords),"SYS_START")
+    sys("v1.1 新增：👥名单面板点名静音 + ⏸暂停/▶继续抓取 + 窄屏自动隐藏搜索框", "SYS_START")
+    sys("v1.1.1 热修：移除 goto/label 写法，修复部分环境报错 Incomplete statement", "SYS_START")
+    sys("v1.1.2 新增：名单搜索 + 全静音/全取消 + 静音面板稳定性修复", "SYS_START")
+    sys("v1.1.3 新增：UI圆角美化 + 更舒适间距排版 + 按钮一风格", "SYS_START")
+    sys("v1.2.0 新增：专用中英脏话检测引擎v5（记录器适配）", "SYS_START")
     updateInfo()
     UI.renderAll()
 end
@@ -860,10 +1108,18 @@ local function passDedup(speaker,text)
     local k=tostring(speaker).."│"..tostring(text)
     local last=Dedup[k]
     Dedup[k]=t
+
+    if math.floor(t) % 3 == 0 then
+        for dk,dt in pairs(Dedup) do
+            if (t-dt) > Config.DedupTTL then Dedup[dk]=nil end
+        end
+    end
+
     return (not last) or ((t-last)>0.35)
 end
 
 local function onCaptured(speaker,text)
+    if state.capturePaused then return end
     if type(text)~="string" or text=="" then return end
     if not passDedup(speaker,text) then return end
     local muted = state.mutedPlayers[speaker]==true
@@ -924,8 +1180,14 @@ hookTCS()
 hookDefault()
 hookChatted()
 
-Players.PlayerAdded:Connect(function(p) sys(p.Name.." 加入了游戏","SYS_JOINLEAVE") end)
-Players.PlayerRemoving:Connect(function(p) sys(p.Name.." 离开了游戏","SYS_JOINLEAVE") end)
+Players.PlayerAdded:Connect(function(p)
+    if p ~= lp then sys(p.Name.." 加入了游戏","SYS_JOINLEAVE") end
+    if UI.panelPeople and UI.panelPeople.Visible then rebuildPeopleList() end
+end)
+Players.PlayerRemoving:Connect(function(p)
+    if p ~= lp then sys(p.Name.." 离开了游戏","SYS_JOINLEAVE") end
+    if UI.panelPeople and UI.panelPeople.Visible then rebuildPeopleList() end
+end)
 
 -- ticker
 do
