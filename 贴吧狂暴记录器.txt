@@ -1,4 +1,4 @@
--- 贴吧狂暴记录器 v1.2.0 (Detector Engine) + 可选 Detector
+-- 贴吧狂暴记录器 v1.2.1 (Detector v5.1) + 可选 Detector
 -- 特别修复：
 -- 1) 彻底解决“复制过长/被截断 → Line 1 Incomplete statement”：
 --    请把本文件上传到 GitHub，然后用下面“Loader 一键启动”加载。
@@ -32,7 +32,7 @@ local WORDS_TABLE_URL = "https://raw.githubusercontent.com/dtbile/-/main/words.l
 
 -- ===== Config =====
 local Config = {
-    Version = "v1.2.0",
+    Version = "v1.2.1",
     FileName = "贴吧聊天记录.txt",
 
     MaxHistory = 4000,
@@ -1093,8 +1093,8 @@ local function buildUI()
     sys("v1.1 新增：👥名单面板点名静音 + ⏸暂停/▶继续抓取 + 窄屏自动隐藏搜索框", "SYS_START")
     sys("v1.1.1 热修：移除 goto/label 写法，修复部分环境报错 Incomplete statement", "SYS_START")
     sys("v1.1.2 新增：名单搜索 + 全静音/全取消 + 静音面板稳定性修复", "SYS_START")
-    sys("v1.1.3 新增：UI圆角美化 + 更舒适间距排版 + 按钮一风格", "SYS_START")
-    sys("v1.2.0 新增：专用中英脏话检测引擎v5（记录器适配）", "SYS_START")
+    sys("v1.1.3 新增：UI圆角美化 + 更舒适间距排版 + 按钮统一风格", "SYS_START")
+    sys("v1.2.1 新增：检测引擎v5.1（谐音/形近字/语境白名单）", "SYS_START")
     updateInfo()
     UI.renderAll()
 end
