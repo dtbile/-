@@ -1,72 +1,46 @@
 --[[
-💀 终极敏感词/脏话检测引擎 v4.1（修复：invalid UTF-8 code 不再崩溃）
-- 修复：字库/输入含非法UTF-8字节时 utf8.codes / utf8.codepoint 报错
-- 修复：cache 清理 table.getn 对 map 无效
-- 保持：双通道 normalize + Aho–Corasick + fuzzy short
+💀 贴吧狂暴专用检测引擎 v5.0
+- 专门适配聊天记录器：scan() 输出 hit/score/hits/categories
+- 中英双通道：FULL(保留中文) + ALNUM(英数压缩)
+- 兼容花式写法：全角、leet、大小写、空格/符号拆分
+- 低误伤：短英文词边界判定 + 常见白名单
+- 无 goto / label，规避部分执行器语法兼容问题
 ]]
 
 local Detector = {}
 Detector.__index = Detector
 
--- ========= 分类权重 =========
+-- ============ helpers ============
+local function clamp(n,a,b)
+	if n<a then return a elseif n>b then return b else return n end
+end
+
+local function shallowCopy(arr)
+	local out = {}
+	for i=1,#arr do out[i]=arr[i] end
+	return out
+end
+
 local function categoryWeight(cat)
-	cat = (cat or ""):lower()
-	if cat:find("advanced") or cat:find("dialect") then return 4 end
-	if cat:find("basic") then return 3 end
+	cat = string.lower(tostring(cat or ""))
+	if cat:find("advanced") or cat:find("dialect") then return 5 end
+	if cat:find("basic") then return 4 end
 	if cat:find("leet") or cat:find("pinyin") or cat:find("abbrev") or cat:find("initial") then return 4 end
-	if cat:find("euphem") then return 2 end
-	if cat:find("memes") or cat:find("sarcasm") or cat:find("rage") then return 1 end
+	if cat:find("english") then return 4 end
+	if cat:find("euphem") then return 3 end
+	if cat:find("rage") then return 2 end
+	if cat:find("memes") then return 1 end
 	return 2
 end
 
--- ========= UTF-8 安全处理（核心修复） =========
-local function isValidUtf8(s)
-	-- Luau: utf8.len 返回 nil 表示非法，并给出错误位置
-	local ok, len = pcall(function() return utf8.len(s) end)
-	return ok and len ~= nil
+local function isAsciiAlphaNumByte(b)
+	return (b>=48 and b<=57) or (b>=97 and b<=122) or (b>=65 and b<=90)
 end
 
-local function forceValidUtf8(s)
-	-- 如果非法：粗暴剔掉所有 0x80-0xFF 字节，保证不崩（代价：丢失部分非ASCII字符）
-	-- 目的：字库构建必须稳定
-	if not isValidUtf8(s) then
-		s = s:gsub("[\128-\255]", "")
-	end
-	return s
-end
-
-local function safeUtf8Codes(s)
-	-- 返回一个“安全迭代器”：遇到非法UTF8就降级成 byte 遍历（只保证不崩）
-	s = forceValidUtf8(s)
-	local ok = pcall(function()
-		for _ in utf8.codes(s) do end
-	end)
-	if ok then
-		return utf8.codes(s), true
-	end
-
-	-- byte fallback
-	local i = 0
-	return function()
-		i += 1
-		if i > #s then return nil end
-		return i, s:byte(i)
-	end, false
-end
-
-local function safeCodepoint(s, i)
-	-- 安全版 utf8.codepoint：失败就返回 nil 并前进1字节
-	local ok, cp = pcall(function() return utf8.codepoint(s, i) end)
-	if ok then return cp, nil end
-	return nil, "bad utf8"
-end
-
--- ========= Unicode/零宽/组合符/全角清洗 =========
-local function removeInvisibleAndControls(s)
-	-- 控制字符 + 常见零宽 + BOM
-	-- 先 forceValidUtf8 避免 gsub/utf8 在奇怪字节上连锁报错
-	s = forceValidUtf8(s)
-	return s:gsub("[%z\1-\31\127-\159\u{200B}-\u{200F}\u{2060}\u{FEFF}]", "")
+local function toLowerASCII(s)
+	return (s:gsub("%u", function(c)
+		return string.char(c:byte()+32)
+	end))
 end
 
 local FULLWIDTH_MAP = {
@@ -74,140 +48,92 @@ local FULLWIDTH_MAP = {
 	["（"]="(",["）"]=")",["＊"]="*",["＋"]="+",["，"]=",",["－"]="-",["．"]=".",
 	["／"]="/",["："]=":",["；"]=";",["＜"]="<",["＝"]="=",["＞"]=">",["？"]="?",
 	["＠"]="@",["［"]="[",["＼"]="\\",["］"]="]",["＾"]="^",["＿"]="_",["｀"]="`",
-	["｛"]="{",["｜"]="|",["｝"]="}",["～"]="~",
-	["　"]=" ",
+	["｛"]="{",["｜"]="|",["｝"]="}",["～"]="~",["　"]=" "
 }
 
-local CHAR_MAP = {
-	["@"]="a", ["$"]="s", ["!"]="i", ["|"]="i",
-	["0"]="o", ["1"]="i", ["3"]="e", ["4"]="a", ["5"]="s", ["7"]="t",
-	["8"]="b", ["9"]="g",
+local LEET_MAP = {
+	["@"]= "a", ["$"]= "s", ["!"]= "i", ["|"]= "i",
+	["0"]= "o", ["1"]= "i", ["3"]= "e", ["4"]= "a", ["5"]= "s", ["7"]= "t", ["8"]= "b", ["9"]= "g",
 }
 
-local function toLowerASCII(s)
-	return (s:gsub("%u", function(c) return string.char(c:byte()+32) end))
+local function safeUtf8(s)
+	if type(s)~="string" then return "" end
+	if s=="" then return "" end
+	local ok, len = pcall(function() return utf8.len(s) end)
+	if ok and len ~= nil then return s end
+	-- 非法UTF8兜底：去除高位字节，至少保证不崩
+	return (s:gsub("[\128-\255]", ""))
 end
 
-local function stripCombiningMarks(s)
-	s = forceValidUtf8(s)
-	return s:gsub("[\u{0300}-\u{036F}\u{1AB0}-\u{1AFF}\u{1DC0}-\u{1DFF}\u{20D0}-\u{20FF}\u{FE20}-\u{FE2F}]", "")
-end
+local function normalizeDual(s)
+	s = safeUtf8(s)
+	s = s:gsub("[%z\1-\31\127-\159\u{200B}-\u{200F}\u{2060}\u{FEFF}]", "")
+	s = s:gsub("[\u{0300}-\u{036F}\u{1AB0}-\u{1AFF}\u{1DC0}-\u{1DFF}\u{20D0}-\u{20FF}\u{FE20}-\u{FE2F}]", "")
+	s = toLowerASCII(s)
 
-local function mapFullwidthAndLeet(s)
-	s = forceValidUtf8(s)
-
-	-- 全角 -> 半角（映射常见符号/空格）
+	-- 全角符号映射
 	s = s:gsub("[%z\1-\127\u{3000}-\u{FFEF}]", function(ch)
 		return FULLWIDTH_MAP[ch] or ch
 	end)
 
-	-- leet 单字符映射（只对 ASCII 安全，非ASCII字节原样返回）
+	-- leet映射
 	s = s:gsub(".", function(ch)
-		return CHAR_MAP[ch] or ch
+		return LEET_MAP[ch] or ch
 	end)
-
-	return s
-end
-
-local function collapseRepeatsUtf8(s)
-	-- 先保证不会 invalid utf8
-	s = forceValidUtf8(s)
-
-	-- 英文压缩更狠
-	s = s:gsub("(%a)%1%1+", "%1%1")
-
-	-- UTF8安全遍历（非法就降级为byte）
-	local iter, isUtf = safeUtf8Codes(s)
-	if not isUtf then
-		-- byte fallback：最多保留2连
-		local out={}
-		local last=nil
-		local run=0
-		for _,b in iter do
-			if b==last then
-				run += 1
-				if run <= 2 then out[#out+1]=string.char(b) end
-			else
-				last=b; run=1
-				out[#out+1]=string.char(b)
-			end
-		end
-		return table.concat(out)
-	end
-
-	-- 正常 UTF8：最多留2连
-	local out={}
-	local last=nil
-	local run=0
-	for _,cp in iter do
-		if cp==last then
-			run += 1
-			if run <= 2 then out[#out+1]=utf8.char(cp) end
-		else
-			last=cp; run=1
-			out[#out+1]=utf8.char(cp)
-		end
-	end
-	return table.concat(out)
-end
-
--- ========= 归一化：输出 FULL / ALNUM =========
-local function normalizeDual(s)
-	if not s or s=="" then return "", "" end
-	s = forceValidUtf8(s)
-	s = removeInvisibleAndControls(s)
-	s = stripCombiningMarks(s)
-	s = toLowerASCII(s)
-	s = mapFullwidthAndLeet(s)
 
 	local fullBuf, alnumBuf = {}, {}
 	local i = 1
 	while i <= #s do
 		local b = s:byte(i)
-		if b < 128 then
+		if b and b < 128 then
 			local ch = s:sub(i,i)
-			local isDigit = (b >= 48 and b <= 57)
-			local isAlpha = (b >= 97 and b <= 122) or (b >= 65 and b <= 90)
-			if isDigit or isAlpha then
+			if isAsciiAlphaNumByte(b) then
 				fullBuf[#fullBuf+1] = ch
 				alnumBuf[#alnumBuf+1] = ch
+			else
+				-- FULL 不保留纯符号，减少噪音
 			end
 			i += 1
 		else
-			-- UTF8 多字节：安全 codepoint
-			local cp, err = safeCodepoint(s, i)
-			if cp then
+			-- UTF8字符（中文等）保留到 FULL
+			local ok, cp = pcall(function() return utf8.codepoint(s, i) end)
+			if ok and cp then
 				local ch = utf8.char(cp)
 				fullBuf[#fullBuf+1] = ch
 				i += #ch
 			else
-				-- 跳过坏字节（关键：不崩）
 				i += 1
 			end
 		end
 	end
 
-	local full = collapseRepeatsUtf8(table.concat(fullBuf))
-	local alnum = collapseRepeatsUtf8(table.concat(alnumBuf))
+	local full = table.concat(fullBuf)
+	local alnum = table.concat(alnumBuf)
+
+	-- 英文拉长压缩：fuuuuuck -> fuuck
+	full = full:gsub("(%a)%1%1+", "%1%1")
+	alnum = alnum:gsub("(%a)%1%1+", "%1%1")
+
 	return full, alnum
 end
 
--- ========= Aho–Corasick =========
+-- ============ AC automaton ============
 local function newNode()
-	return {next = {}, fail = 1, out = nil}
+	return {next={}, fail=1, out=nil}
 end
 
-local function addOut(node, payload)
-	if not node.out then node.out = {payload} else node.out[#node.out+1] = payload end
+local function pushOut(node, p)
+	if not node.out then node.out = {p} else node.out[#node.out+1] = p end
 end
 
 local function buildAC(payloads)
-	local nodes = { newNode() } -- root=1
+	local nodes = {newNode()} -- root=1
 
-	local function insert(word, payload)
+	for _,p in ipairs(payloads) do
 		local cur = 1
-		for i=1,#word do
-			local c = word:byte(i)
+		local w = p.norm
+		for i=1,#w do
+			local c = w:byte(i)
 			local nxt = nodes[cur].next[c]
 			if not nxt then
 				nodes[#nodes+1] = newNode()
@@ -216,15 +142,11 @@ local function buildAC(payloads)
 			end
 			cur = nxt
 		end
-		addOut(nodes[cur], payload)
-	end
-
-	for _,p in ipairs(payloads) do
-		insert(p.norm, p)
+		pushOut(nodes[cur], p)
 	end
 
 	local q, head = {}, 1
-	for _, nxt in pairs(nodes[1].next) do
+	for _,nxt in pairs(nodes[1].next) do
 		nodes[nxt].fail = 1
 		q[#q+1] = nxt
 	end
@@ -242,8 +164,7 @@ local function buildAC(payloads)
 				if nodes[u].out then
 					for i=1,#nodes[link].out do nodes[u].out[#nodes[u].out+1] = nodes[link].out[i] end
 				else
-					-- table.clone 在 Luau 有；没有也不致命
-					nodes[u].out = table.clone and table.clone(nodes[link].out) or nodes[link].out
+					nodes[u].out = shallowCopy(nodes[link].out)
 				end
 			end
 			q[#q+1] = u
@@ -253,176 +174,128 @@ local function buildAC(payloads)
 	return nodes
 end
 
-local function acScan(nodes, s, hitMap, outArr)
+local function boundaryOK(s, st, ed)
+	local lb = (st>1) and s:byte(st-1) or nil
+	local rb = (ed<#s) and s:byte(ed+1) or nil
+	local leftOK = (not lb) or (not isAsciiAlphaNumByte(lb))
+	local rightOK = (not rb) or (not isAsciiAlphaNumByte(rb))
+	return leftOK and rightOK
+end
+
+local function acScan(nodes, s, onHit)
 	local st = 1
 	for i=1,#s do
 		local c = s:byte(i)
-		while st ~= 1 and not nodes[st].next[c] do
-			st = nodes[st].fail
-		end
+		while st ~= 1 and not nodes[st].next[c] do st = nodes[st].fail end
 		st = nodes[st].next[c] or 1
 		local out = nodes[st].out
 		if out then
 			for k=1,#out do
-				local p = out[k]
-				local key = p.norm .. "|" .. p.cat
-				if not hitMap[key] then
-					hitMap[key] = true
-					outArr[#outArr+1] = { word = p.raw, category = p.cat, weight = p.weight }
-				end
+				onHit(out[k], i)
 			end
 		end
 	end
 end
 
--- ========= fuzzy short =========
-local function levenshteinLimit(a, b, limit)
-	if a == b then return 0 end
-	local la, lb = #a, #b
-	if math.abs(la - lb) > limit then return limit + 1 end
-	local prev = {}
-	for j=0,lb do prev[j] = j end
-	for i=1,la do
-		local cur = {[0]=i}
-		local rowMin = cur[0]
-		local ai = a:byte(i)
-		for j=1,lb do
-			local cost = (ai == b:byte(j)) and 0 or 1
-			local v = math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + cost)
-			cur[j] = v
-			if v < rowMin then rowMin = v end
-		end
-		if rowMin > limit then return limit + 1 end
-		prev = cur
-	end
-	return prev[lb]
-end
+-- 常见短词误判防护（ALNUM通道）
+local SHORT_EN_STRICT = {
+	ass=true, damn=true, crap=true
+}
 
-local function fuzzyShortHits(alnum, targets, limit, hitMap, outArr)
-	if alnum == "" then return end
-	for _,t in ipairs(targets) do
-		local lt = #t
-		if #alnum >= lt then
-			for i=1,(#alnum - lt + 1) do
-				local sub = alnum:sub(i, i+lt-1)
-				if levenshteinLimit(sub, t, limit) <= limit then
-					local key = t .. "|fuzzy"
-					if not hitMap[key] then
-						hitMap[key] = true
-						outArr[#outArr+1] = { word = t, category = "fuzzy_short", weight = 4 }
-					end
-					break
-				end
-			end
-		end
-	end
-end
+-- ============ API ============
+function Detector.new(wordsTable, opts)
+	wordsTable = wordsTable or {}
+	opts = opts or {}
 
-local function countMap(t)
-	local c=0
-	for _ in pairs(t) do c+=1 end
-	return c
-end
-
--- ========= Detector.new / scan =========
-function Detector.new(wordsTable)
-	-- flatten 词库（强制将每个 raw 词条变成合法UTF8再处理）
-	local payloads = {}
-	local seen = {}
+	local payloadFull, payloadAlnum = {}, {}
+	local uniqFull, uniqAlnum = {}, {}
 
 	for cat, list in pairs(wordsTable) do
-		if type(list) == "table" then
-			local wgt = categoryWeight(cat)
+		if type(list)=="table" then
 			for i=1,#list do
-				local raw = list[i]
-				if type(raw) == "string" and raw ~= "" then
-					raw = forceValidUtf8(raw) -- ✅ 核心：先保证不炸
+				local raw = tostring(list[i] or "")
+				if raw ~= "" then
 					local full, alnum = normalizeDual(raw)
+					local w = categoryWeight(cat)
 
-					if full ~= "" then
-						local key = "F|"..full.."|"..tostring(cat)
-						if not seen[key] then
-							seen[key] = true
-							payloads[#payloads+1] = { norm = full, raw = raw, cat = tostring(cat), weight = wgt }
-						end
+					if #full >= 2 and not uniqFull[full] then
+						uniqFull[full] = true
+						payloadFull[#payloadFull+1] = {norm=full, raw=raw, cat=cat, weight=w, channel="full"}
 					end
-					if alnum ~= "" and alnum ~= full then
-						local key2 = "A|"..alnum.."|"..tostring(cat)
-						if not seen[key2] then
-							seen[key2] = true
-							payloads[#payloads+1] = { norm = alnum, raw = raw, cat = tostring(cat), weight = wgt }
-						end
+
+					if #alnum >= 2 and not uniqAlnum[alnum] then
+						uniqAlnum[alnum] = true
+						payloadAlnum[#payloadAlnum+1] = {norm=alnum, raw=raw, cat=cat, weight=w, channel="alnum"}
 					end
 				end
 			end
 		end
 	end
 
-	local self = setmetatable({
-		ac = buildAC(payloads),
-		fuzzy = true,
-		fuzzyLimit = 1,
-		fuzzyTargets = {"sb","cnm","nmsl","tmd","wdnmd","mlgb","wqnmlgb"},
-		cache = {},
-		cacheMax = 200,
-	}, Detector)
-
+	local self = setmetatable({}, Detector)
+	self.acFull = buildAC(payloadFull)
+	self.acAlnum = buildAC(payloadAlnum)
+	self.opts = {
+		maxHits = tonumber(opts.maxHits) or 24,
+		scoreCap = tonumber(opts.scoreCap) or 100,
+	}
 	return self
 end
 
 function Detector:scan(text)
-	if not text or text == "" then
-		return {hit=false, level="clean", score=0, matches={}, norm_full="", norm_alnum=""}
-	end
-
-	-- 先强制合法UTF8，避免 scan 时崩
-	text = forceValidUtf8(text)
-
-	local cached = self.cache[text]
-	if cached then return cached end
-
-	local full, alnum = normalizeDual(text)
-
+	local full, alnum = normalizeDual(tostring(text or ""))
 	local hitMap = {}
-	local matches = {}
-
-	acScan(self.ac, full, hitMap, matches)
-	if alnum ~= full then acScan(self.ac, alnum, hitMap, matches) end
-
-	if self.fuzzy and #matches == 0 then
-		fuzzyShortHits(alnum, self.fuzzyTargets, self.fuzzyLimit, hitMap, matches)
-	end
-
+	local hits = {}
+	local categories = {}
 	local score = 0
-	for i=1,#matches do
-		score += (matches[i].weight or 1)
-	end
 
-	local level = "clean"
-	if score >= 10 then level = "critical"
-	elseif score >= 6 then level = "high"
-	elseif score >= 3 then level = "medium"
-	elseif score >= 1 then level = "low"
-	end
+	local function consume(payload, ed, channelText)
+		local st = ed - #payload.norm + 1
+		if st < 1 then return end
 
-	local res = {
-		hit = (#matches > 0),
-		level = level,
-		score = score,
-		matches = matches,
-		norm_full = full,
-		norm_alnum = alnum,
-	}
-
-	-- ✅ map cache 正确清理
-	if self.cacheMax > 0 then
-		if countMap(self.cache) > self.cacheMax then
-			self.cache = {}
+		if payload.channel == "alnum" then
+			if SHORT_EN_STRICT[payload.norm] and not boundaryOK(channelText, st, ed) then
+				return
+			end
 		end
-		self.cache[text] = res
+
+		local key = payload.channel.."|"..payload.norm.."|"..st
+		if hitMap[key] then return end
+		hitMap[key] = true
+
+		hits[#hits+1] = {
+			word = payload.raw,
+			norm = payload.norm,
+			cat = payload.cat,
+			channel = payload.channel,
+			startPos = st,
+			endPos = ed,
+		}
+		categories[payload.cat] = true
+		score += payload.weight
 	end
 
-	return res
+	acScan(self.acFull, full, function(p, ed)
+		consume(p, ed, full)
+	end)
+
+	acScan(self.acAlnum, alnum, function(p, ed)
+		consume(p, ed, alnum)
+	end)
+
+	if #hits > self.opts.maxHits then
+		while #hits > self.opts.maxHits do table.remove(hits) end
+	end
+
+	score = clamp(score, 0, self.opts.scoreCap)
+
+	return {
+		hit = #hits > 0,
+		score = score,
+		hits = hits,
+		categories = categories,
+		norm = {full=full, alnum=alnum},
+	}
 end
 
 return Detector
