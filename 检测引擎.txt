@@ -1,16 +1,16 @@
 --[[
-💀 贴吧狂暴专用检测引擎 v5.0
-- 专门适配聊天记录器：scan() 输出 hit/score/hits/categories
-- 中英双通道：FULL(保留中文) + ALNUM(英数压缩)
-- 兼容花式写法：全角、leet、大小写、空格/符号拆分
-- 低误伤：短英文词边界判定 + 常见白名单
-- 无 goto / label，规避部分执行器语法兼容问题
+💀 贴吧狂暴专用检测引擎 v5.1
+- 中英混合检测（FULL + ALNUM 双通道）
+- 支持常见谐音/形近字归一（中文规避写法）
+- 修复中文分词场景（空格/符号拆分后仍可命中）
+- 语境降误伤：短英文边界判定 + 中文组合词白名单
+- 无 goto/label，兼容性更稳
 ]]
 
 local Detector = {}
 Detector.__index = Detector
 
--- ============ helpers ============
+-- ========= helpers =========
 local function clamp(n,a,b)
 	if n<a then return a elseif n>b then return b else return n end
 end
@@ -25,8 +25,8 @@ local function categoryWeight(cat)
 	cat = string.lower(tostring(cat or ""))
 	if cat:find("advanced") or cat:find("dialect") then return 5 end
 	if cat:find("basic") then return 4 end
-	if cat:find("leet") or cat:find("pinyin") or cat:find("abbrev") or cat:find("initial") then return 4 end
 	if cat:find("english") then return 4 end
+	if cat:find("leet") or cat:find("pinyin") or cat:find("abbrev") or cat:find("initial") then return 4 end
 	if cat:find("euphem") then return 3 end
 	if cat:find("rage") then return 2 end
 	if cat:find("memes") then return 1 end
@@ -56,13 +56,44 @@ local LEET_MAP = {
 	["0"]= "o", ["1"]= "i", ["3"]= "e", ["4"]= "a", ["5"]= "s", ["7"]= "t", ["8"]= "b", ["9"]= "g",
 }
 
+-- 中文谐音/形近字归一（常见对抗写法）
+local FUZZY_CHAR_MAP = {
+	["祢"]="你",["妳"]="你",["尓"]="你",["伱"]="你",["沵"]="你",
+	["瑪"]="妈",["玛"]="妈",["麻"]="妈",["嘛"]="妈",["馬"]="马",
+	["艸"]="草",["艹"]="草",["愺"]="草",["騲"]="草",
+	["儍"]="傻",["煞"]="傻",["潵"]="傻",
+	["滾"]="滚",["袞"]="滚",
+	["曰"]="日",["ㄖ"]="日",
+	["腦"]="脑",["恼"]="脑",
+	["叼"]="屌",["吊"]="屌",["釣"]="屌",
+}
+
+-- 组合词白名单（主要用于单字命中降误伤）
+local SAFE_PHRASES = {
+	"星期日","日期","日本","日志","日常","日历","日出","日落",
+	"草莓","草原","草地","草稿","草案","起草","花草",
+	"妈妈","妈咪","姨妈","姑妈","大妈",
+	"爷爷","姥爷","大爷","少爷",
+	"老爹","干爹","爹妈",
+	"依靠","可靠","靠近","靠岸"
+}
+
 local function safeUtf8(s)
 	if type(s)~="string" then return "" end
 	if s=="" then return "" end
 	local ok, len = pcall(function() return utf8.len(s) end)
 	if ok and len ~= nil then return s end
-	-- 非法UTF8兜底：去除高位字节，至少保证不崩
 	return (s:gsub("[\128-\255]", ""))
+end
+
+local function applyFuzzyZhMap(s)
+	s = safeUtf8(s)
+	local out = {}
+	for _,cp in utf8.codes(s) do
+		local ch = utf8.char(cp)
+		out[#out+1] = FUZZY_CHAR_MAP[ch] or ch
+	end
+	return table.concat(out)
 end
 
 local function normalizeDual(s)
@@ -70,13 +101,12 @@ local function normalizeDual(s)
 	s = s:gsub("[%z\1-\31\127-\159\u{200B}-\u{200F}\u{2060}\u{FEFF}]", "")
 	s = s:gsub("[\u{0300}-\u{036F}\u{1AB0}-\u{1AFF}\u{1DC0}-\u{1DFF}\u{20D0}-\u{20FF}\u{FE20}-\u{FE2F}]", "")
 	s = toLowerASCII(s)
+	s = applyFuzzyZhMap(s)
 
-	-- 全角符号映射
 	s = s:gsub("[%z\1-\127\u{3000}-\u{FFEF}]", function(ch)
 		return FULLWIDTH_MAP[ch] or ch
 	end)
 
-	-- leet映射
 	s = s:gsub(".", function(ch)
 		return LEET_MAP[ch] or ch
 	end)
@@ -90,12 +120,9 @@ local function normalizeDual(s)
 			if isAsciiAlphaNumByte(b) then
 				fullBuf[#fullBuf+1] = ch
 				alnumBuf[#alnumBuf+1] = ch
-			else
-				-- FULL 不保留纯符号，减少噪音
 			end
 			i += 1
 		else
-			-- UTF8字符（中文等）保留到 FULL
 			local ok, cp = pcall(function() return utf8.codepoint(s, i) end)
 			if ok and cp then
 				local ch = utf8.char(cp)
@@ -110,30 +137,27 @@ local function normalizeDual(s)
 	local full = table.concat(fullBuf)
 	local alnum = table.concat(alnumBuf)
 
-	-- 英文拉长压缩：fuuuuuck -> fuuck
 	full = full:gsub("(%a)%1%1+", "%1%1")
 	alnum = alnum:gsub("(%a)%1%1+", "%1%1")
 
 	return full, alnum
 end
 
--- ============ AC automaton ============
+-- ========= AC =========
 local function newNode()
 	return {next={}, fail=1, out=nil}
 end
 
 local function pushOut(node, p)
-	if not node.out then node.out = {p} else node.out[#node.out+1] = p end
+	if not node.out then node.out={p} else node.out[#node.out+1]=p end
 end
 
 local function buildAC(payloads)
-	local nodes = {newNode()} -- root=1
-
+	local nodes = {newNode()}
 	for _,p in ipairs(payloads) do
 		local cur = 1
-		local w = p.norm
-		for i=1,#w do
-			local c = w:byte(i)
+		for i=1,#p.norm do
+			local c = p.norm:byte(i)
 			local nxt = nodes[cur].next[c]
 			if not nxt then
 				nodes[#nodes+1] = newNode()
@@ -147,31 +171,41 @@ local function buildAC(payloads)
 
 	local q, head = {}, 1
 	for _,nxt in pairs(nodes[1].next) do
-		nodes[nxt].fail = 1
-		q[#q+1] = nxt
+		nodes[nxt].fail=1
+		q[#q+1]=nxt
 	end
 
-	while head <= #q do
-		local v = q[head]; head += 1
-		for ch, u in pairs(nodes[v].next) do
-			local f = nodes[v].fail
-			while f ~= 1 and not nodes[f].next[ch] do
-				f = nodes[f].fail
-			end
-			local link = nodes[f].next[ch] or 1
-			nodes[u].fail = link
+	while head<=#q do
+		local v=q[head]; head+=1
+		for ch,u in pairs(nodes[v].next) do
+			local f=nodes[v].fail
+			while f~=1 and not nodes[f].next[ch] do f=nodes[f].fail end
+			local link=nodes[f].next[ch] or 1
+			nodes[u].fail=link
 			if nodes[link].out then
 				if nodes[u].out then
-					for i=1,#nodes[link].out do nodes[u].out[#nodes[u].out+1] = nodes[link].out[i] end
+					for i=1,#nodes[link].out do nodes[u].out[#nodes[u].out+1]=nodes[link].out[i] end
 				else
-					nodes[u].out = shallowCopy(nodes[link].out)
+					nodes[u].out=shallowCopy(nodes[link].out)
 				end
 			end
-			q[#q+1] = u
+			q[#q+1]=u
 		end
 	end
-
 	return nodes
+end
+
+local function acScan(nodes, s, onHit)
+	local st = 1
+	for i=1,#s do
+		local c = s:byte(i)
+		while st~=1 and not nodes[st].next[c] do st = nodes[st].fail end
+		st = nodes[st].next[c] or 1
+		local out = nodes[st].out
+		if out then
+			for k=1,#out do onHit(out[k], i) end
+		end
+	end
 end
 
 local function boundaryOK(s, st, ed)
@@ -182,27 +216,32 @@ local function boundaryOK(s, st, ed)
 	return leftOK and rightOK
 end
 
-local function acScan(nodes, s, onHit)
-	local st = 1
-	for i=1,#s do
-		local c = s:byte(i)
-		while st ~= 1 and not nodes[st].next[c] do st = nodes[st].fail end
-		st = nodes[st].next[c] or 1
-		local out = nodes[st].out
-		if out then
-			for k=1,#out do
-				onHit(out[k], i)
-			end
+local function buildSafeSpans(s)
+	local spans={}
+	for i=1,#SAFE_PHRASES do
+		local ph=SAFE_PHRASES[i]
+		local st=1
+		while true do
+			local a,b = s:find(ph, st, true)
+			if not a then break end
+			spans[#spans+1] = {a,b}
+			st = a + 1
 		end
 	end
+	return spans
 end
 
--- 常见短词误判防护（ALNUM通道）
-local SHORT_EN_STRICT = {
-	ass=true, damn=true, crap=true
-}
+local function inSafeSpan(spans, st, ed)
+	for i=1,#spans do
+		local a,b = spans[i][1], spans[i][2]
+		if st>=a and ed<=b then return true end
+	end
+	return false
+end
 
--- ============ API ============
+local SHORT_EN_STRICT = { ass=true, damn=true, crap=true }
+
+-- ========= API =========
 function Detector.new(wordsTable, opts)
 	wordsTable = wordsTable or {}
 	opts = opts or {}
@@ -217,26 +256,24 @@ function Detector.new(wordsTable, opts)
 				if raw ~= "" then
 					local full, alnum = normalizeDual(raw)
 					local w = categoryWeight(cat)
-
-					if #full >= 2 and not uniqFull[full] then
-						uniqFull[full] = true
-						payloadFull[#payloadFull+1] = {norm=full, raw=raw, cat=cat, weight=w, channel="full"}
+					if #full>=1 and not uniqFull[full] then
+						uniqFull[full]=true
+						payloadFull[#payloadFull+1]={norm=full, raw=raw, cat=cat, weight=w, channel="full"}
 					end
-
-					if #alnum >= 2 and not uniqAlnum[alnum] then
-						uniqAlnum[alnum] = true
-						payloadAlnum[#payloadAlnum+1] = {norm=alnum, raw=raw, cat=cat, weight=w, channel="alnum"}
+					if #alnum>=2 and not uniqAlnum[alnum] then
+						uniqAlnum[alnum]=true
+						payloadAlnum[#payloadAlnum+1]={norm=alnum, raw=raw, cat=cat, weight=w, channel="alnum"}
 					end
 				end
 			end
 		end
 	end
 
-	local self = setmetatable({}, Detector)
+	local self=setmetatable({}, Detector)
 	self.acFull = buildAC(payloadFull)
 	self.acAlnum = buildAC(payloadAlnum)
 	self.opts = {
-		maxHits = tonumber(opts.maxHits) or 24,
+		maxHits = tonumber(opts.maxHits) or 28,
 		scoreCap = tonumber(opts.scoreCap) or 100,
 	}
 	return self
@@ -244,19 +281,19 @@ end
 
 function Detector:scan(text)
 	local full, alnum = normalizeDual(tostring(text or ""))
-	local hitMap = {}
-	local hits = {}
-	local categories = {}
+	local safeSpansFull = buildSafeSpans(full)
+
+	local hitMap, hits, categories = {}, {}, {}
 	local score = 0
 
 	local function consume(payload, ed, channelText)
 		local st = ed - #payload.norm + 1
 		if st < 1 then return end
 
-		if payload.channel == "alnum" then
-			if SHORT_EN_STRICT[payload.norm] and not boundaryOK(channelText, st, ed) then
-				return
-			end
+		if payload.channel=="alnum" then
+			if SHORT_EN_STRICT[payload.norm] and not boundaryOK(channelText, st, ed) then return end
+		elseif payload.channel=="full" then
+			if #payload.norm<=1 and inSafeSpan(safeSpansFull, st, ed) then return end
 		end
 
 		local key = payload.channel.."|"..payload.norm.."|"..st
@@ -275,20 +312,14 @@ function Detector:scan(text)
 		score += payload.weight
 	end
 
-	acScan(self.acFull, full, function(p, ed)
-		consume(p, ed, full)
-	end)
-
-	acScan(self.acAlnum, alnum, function(p, ed)
-		consume(p, ed, alnum)
-	end)
+	acScan(self.acFull, full, function(p, ed) consume(p, ed, full) end)
+	acScan(self.acAlnum, alnum, function(p, ed) consume(p, ed, alnum) end)
 
 	if #hits > self.opts.maxHits then
 		while #hits > self.opts.maxHits do table.remove(hits) end
 	end
 
 	score = clamp(score, 0, self.opts.scoreCap)
-
 	return {
 		hit = #hits > 0,
 		score = score,
